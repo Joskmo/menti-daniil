@@ -1,0 +1,13 @@
+[
+  {
+    "id": 7,
+    "first_name": "Мария",
+    "last_name": "Соколова",
+    "email": "maria@example.com",
+    "active": true,
+    "roles": [
+      "user",
+      "tester"
+    ]
+  }
+]

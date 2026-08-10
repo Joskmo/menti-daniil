@@ -24,6 +24,13 @@ class GitHubGateway(Protocol):
 class BridgeSettings:
     in_progress_status_id: str
     assignee_id: str
+    mentor_assignee_id: str | None = None
+
+    def accepts_assignee(self, assignee_ids: tuple[str, ...]) -> bool:
+        return self.assignee_id in assignee_ids or (
+            self.mentor_assignee_id is not None
+            and self.mentor_assignee_id in assignee_ids
+        )
 
 
 class BridgeService:
@@ -42,7 +49,7 @@ class BridgeService:
     def backfill_task_ids(self) -> None:
         tasks = sorted(self.yonote.list_tasks(), key=lambda task: task.created_at)
         for task in tasks:
-            if self.settings.assignee_id not in task.assignee_ids:
+            if not self.settings.accepts_assignee(task.assignee_ids):
                 continue
             mapping = self.store.get_or_allocate(task.row_id, task.task_id)
             if not task.task_id:
@@ -54,7 +61,7 @@ class BridgeService:
         for task in tasks:
             if task.status_id != self.settings.in_progress_status_id:
                 continue
-            if self.settings.assignee_id not in task.assignee_ids:
+            if not self.settings.accepts_assignee(task.assignee_ids):
                 continue
             if task.branch_url:
                 continue
@@ -96,7 +103,7 @@ class BridgeService:
 
     def _register_existing_task_ids(self, tasks: list[Task]) -> None:
         for task in tasks:
-            if self.settings.assignee_id not in task.assignee_ids:
+            if not self.settings.accepts_assignee(task.assignee_ids):
                 continue
             if task.task_id:
                 self.store.get_or_allocate(task.row_id, task.task_id)

@@ -23,6 +23,7 @@ class Settings:
     review_status_id: str
     done_status_id: str
     assignee_id: str
+    mentor_assignee_id: str
     repository: str
     base_branch: str
     poll_interval: int
@@ -136,6 +137,10 @@ class Settings:
             ),
             assignee_id=values.get(
                 "YONOTE_ASSIGNEE_ID", "632a8b92-3611-477b-b6d6-b5a0df87e57e"
+            ),
+            mentor_assignee_id=values.get(
+                "YONOTE_MENTOR_ASSIGNEE_ID",
+                "b5b7f053-07c2-4008-8b1b-72eeab60724a",
             ),
             repository=values.get("GITHUB_REPOSITORY", "Joskmo/menti-daniil"),
             base_branch=values.get("GITHUB_BASE_BRANCH", "main"),

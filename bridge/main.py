@@ -53,7 +53,11 @@ def main() -> None:
         known_hosts=settings.known_hosts,
     )
     service = BridgeService(
-        BridgeSettings(settings.in_progress_status_id, settings.assignee_id),
+        BridgeSettings(
+            settings.in_progress_status_id,
+            settings.assignee_id,
+            settings.mentor_assignee_id,
+        ),
         yonote,
         github,
         store,

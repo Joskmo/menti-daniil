@@ -80,6 +80,48 @@ def test_reconcile_creates_one_branch_and_records_it_idempotently(tmp_path) -> N
     ]
 
 
+def test_reconcile_creates_branch_for_mentor_assignee(tmp_path) -> None:
+    task = Task(
+        row_id="row-mentor",
+        title="Подготовить ошибочный JSON-код",
+        project="json",
+        status_id="in-progress",
+        assignee_ids=("arseny",),
+        task_id=None,
+        branch_url=None,
+        pr_url=None,
+        created_at="2026-08-10T12:00:00Z",
+    )
+    yonote = FakeYonote([task])
+    github = FakeGitHub()
+    service = BridgeService(
+        settings=BridgeSettings(
+            in_progress_status_id="in-progress",
+            assignee_id="daniil",
+            mentor_assignee_id="arseny",
+        ),
+        yonote=yonote,
+        github=github,
+        store=SQLiteStore(tmp_path / "bridge.db"),
+    )
+
+    service.reconcile_once()
+
+    assert github.created == ["task/PY-001-podgotovit-oshibochnyy-json-kod"]
+    assert yonote.updates == [
+        (
+            "row-mentor",
+            {
+                "task_id": "PY-001",
+                "branch_url": (
+                    "https://github.com/Joskmo/menti-daniil/tree/"
+                    "task/PY-001-podgotovit-oshibochnyy-json-kod"
+                ),
+            },
+        )
+    ]
+
+
 def test_reconcile_ignores_tasks_not_in_progress(tmp_path) -> None:
     task = Task(
         row_id="row-1",

@@ -26,6 +26,7 @@ def test_settings_have_safe_deployment_defaults() -> None:
 
     assert settings.repository == "Joskmo/menti-daniil"
     assert settings.project_property_id == "4029b701-dd4d-478a-94d4-f5fbee5a7a9c"
+    assert settings.mentor_assignee_id == "b5b7f053-07c2-4008-8b1b-72eeab60724a"
     assert settings.base_branch == "main"
     assert settings.poll_interval == 15
     assert settings.port == 8080

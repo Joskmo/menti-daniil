@@ -1,6 +1,9 @@
 import json
 
-with open(r"C:/Users/Даниил/Desktop/proga/py/json parse practice/test.json", "r", encoding="utf-8") as file:
+with open(
+    r"C:/Users/Даниил/Desktop/proga/py/json parse practice/test.json",
+    encoding="utf-8",
+) as file:
     data = json.load(file)
 
 last_id = data[-1]['id']
@@ -19,7 +22,11 @@ new_User = {
 
 data.append(new_User)
 
-with open(r"C:/Users/Даниил/Desktop/proga/py/json parse practice/test.json", 'w', encoding="utf-8") as file:
+with open(
+    r"C:/Users/Даниил/Desktop/proga/py/json parse practice/test.json",
+    "w",
+    encoding="utf-8",
+) as file:
     json.dump(data, file, ensure_ascii=False, indent=2)
 
 print(f"Данные успешно добавлены! Ваш id: {nextid}")

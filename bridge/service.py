@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 from typing import Protocol
 
-from bridge.domain import task_branch_name
+from bridge.domain import project_directory_name, task_branch_name
 from bridge.models import Task
 from bridge.store import SQLiteStore
 
@@ -13,7 +13,11 @@ class YonoteGateway(Protocol):
 
 
 class GitHubGateway(Protocol):
-    def ensure_branch(self, branch: str, task_title: str) -> str: ...
+    def ensure_branch(
+        self,
+        branch: str,
+        project_directory: str,
+    ) -> str: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,18 +58,34 @@ class BridgeService:
                 continue
             if task.branch_url:
                 continue
-
-            mapping = self.store.get_or_allocate(task.row_id, task.task_id)
-            if mapping.branch_name is None:
+            mapping = self.store.find_by_row(task.row_id)
+            has_reserved_intent = bool(
+                mapping and mapping.branch_name and mapping.project_name
+            )
+            if not has_reserved_intent:
+                if not task.project:
+                    continue
+                try:
+                    project_directory = project_directory_name(task.project)
+                except ValueError:
+                    continue
+                mapping = mapping or self.store.get_or_allocate(
+                    task.row_id,
+                    task.task_id,
+                )
                 mapping = self.store.reserve_branch(
                     task.row_id,
-                    task_branch_name(mapping.task_id, task.title),
+                    mapping.branch_name
+                    or task_branch_name(mapping.task_id, task.title),
+                    project_directory,
                 )
+            assert mapping is not None
             assert mapping.branch_name is not None
+            assert mapping.project_name is not None
             branch_name = mapping.branch_name
             branch_url = mapping.branch_url or self.github.ensure_branch(
                 branch_name,
-                task.title,
+                mapping.project_name,
             )
             if not mapping.branch_url:
                 self.store.record_branch(task.row_id, branch_name, branch_url)

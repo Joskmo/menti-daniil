@@ -25,6 +25,7 @@ def test_settings_have_safe_deployment_defaults() -> None:
     settings = Settings.from_mapping(VALID_SETTINGS)
 
     assert settings.repository == "Joskmo/menti-daniil"
+    assert settings.project_property_id == "4029b701-dd4d-478a-94d4-f5fbee5a7a9c"
     assert settings.base_branch == "main"
     assert settings.poll_interval == 15
     assert settings.port == 8080

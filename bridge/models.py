@@ -5,6 +5,7 @@ from dataclasses import dataclass
 class Task:
     row_id: str
     title: str
+    project: str | None
     status_id: str | None
     assignee_ids: tuple[str, ...]
     task_id: str | None

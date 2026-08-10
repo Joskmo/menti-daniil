@@ -29,6 +29,7 @@ class TaskMapping:
     row_id: str
     task_id: str
     branch_name: str | None
+    project_name: str | None
     branch_url: str | None
     pr_url: str | None
     pr_number: int | None
@@ -69,6 +70,7 @@ class SQLiteStore:
                     row_id TEXT PRIMARY KEY,
                     task_id TEXT NOT NULL UNIQUE,
                     branch_name TEXT UNIQUE,
+                    project_name TEXT,
                     branch_url TEXT,
                     pr_url TEXT
                 )
@@ -78,6 +80,7 @@ class SQLiteStore:
                 row["name"] for row in connection.execute("PRAGMA table_info(task_mappings)")
             }
             for column, declaration in (
+                ("project_name", "TEXT"),
                 ("pr_number", "INTEGER"),
                 ("pr_state", "TEXT"),
                 ("pr_updated_at", "TEXT"),
@@ -137,7 +140,12 @@ class SQLiteStore:
             assert row is not None
             return self._mapping(row)
 
-    def reserve_branch(self, row_id: str, branch_name: str) -> TaskMapping:
+    def reserve_branch(
+        self,
+        row_id: str,
+        branch_name: str,
+        project_name: str,
+    ) -> TaskMapping:
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
@@ -147,12 +155,21 @@ class SQLiteStore:
                 raise KeyError(f"Unknown Yonote row: {row_id}")
             if row["branch_name"] is None:
                 connection.execute(
-                    "UPDATE task_mappings SET branch_name = ? WHERE row_id = ?",
-                    (branch_name, row_id),
+                    """
+                    UPDATE task_mappings
+                    SET branch_name = ?, project_name = ?
+                    WHERE row_id = ?
+                    """,
+                    (branch_name, project_name, row_id),
                 )
-                row = connection.execute(
-                    "SELECT * FROM task_mappings WHERE row_id = ?", (row_id,)
-                ).fetchone()
+            elif row["project_name"] is None:
+                connection.execute(
+                    "UPDATE task_mappings SET project_name = ? WHERE row_id = ?",
+                    (project_name, row_id),
+                )
+            row = connection.execute(
+                "SELECT * FROM task_mappings WHERE row_id = ?", (row_id,)
+            ).fetchone()
             assert row is not None
             return self._mapping(row)
 
@@ -171,6 +188,13 @@ class SQLiteStore:
             ).fetchone()
             assert row is not None
             return self._mapping(row)
+
+    def find_by_row(self, row_id: str) -> TaskMapping | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM task_mappings WHERE row_id = ?", (row_id,)
+            ).fetchone()
+            return self._mapping(row) if row else None
 
     def find_by_branch(self, branch_name: str) -> TaskMapping | None:
         with self._connect() as connection:
@@ -357,6 +381,7 @@ class SQLiteStore:
             row_id=row["row_id"],
             task_id=row["task_id"],
             branch_name=row["branch_name"],
+            project_name=row["project_name"],
             branch_url=row["branch_url"],
             pr_url=row["pr_url"],
             pr_number=row["pr_number"],

@@ -15,6 +15,7 @@ class Settings:
     board_id: str
     status_property_id: str
     assignee_property_id: str
+    project_property_id: str
     task_id_property_id: str
     branch_property_id: str
     pr_property_id: str
@@ -111,6 +112,9 @@ class Settings:
             ),
             assignee_property_id=values.get(
                 "YONOTE_ASSIGNEE_PROPERTY_ID", "1cce00e1-17b8-4f4b-8339-21fd6e5ee371"
+            ),
+            project_property_id=values.get(
+                "YONOTE_PROJECT_PROPERTY_ID", "4029b701-dd4d-478a-94d4-f5fbee5a7a9c"
             ),
             task_id_property_id=values.get(
                 "YONOTE_TASK_ID_PROPERTY_ID", "2add1be5-7a2d-5814-979b-87f505f59a1c"

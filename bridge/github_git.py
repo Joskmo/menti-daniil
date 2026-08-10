@@ -1,6 +1,7 @@
 import os
 import re
 import subprocess
+import tempfile
 import threading
 from pathlib import Path
 from typing import Protocol
@@ -45,7 +46,7 @@ class GitBranchClient:
         self.runner = runner or SubprocessRunner()
         self._lock = threading.Lock()
 
-    def ensure_branch(self, branch: str) -> str:
+    def ensure_branch(self, branch: str, task_title: str) -> str:
         if not _BRANCH_PATTERN.fullmatch(branch):
             raise ValueError(f"Unsafe branch name: {branch!r}")
 
@@ -68,6 +69,7 @@ class GitBranchClient:
                     f"refs/heads/{self.base_branch}:refs/remotes/origin/{self.base_branch}",
                 ]
             )
+            commit = self._project_commit(branch, task_title)
             self._run(
                 [
                     "git",
@@ -75,13 +77,104 @@ class GitBranchClient:
                     str(self.git_dir),
                     "push",
                     self.repository_ssh,
-                    (
-                        f"refs/remotes/origin/{self.base_branch}:"
-                        f"refs/heads/{branch}"
-                    ),
+                    f"{commit}:refs/heads/{branch}",
                 ]
             )
             return self._branch_url(branch)
+
+    def _project_commit(self, branch: str, task_title: str) -> str:
+        project_name = branch.removeprefix("task/")
+        task_id = "-".join(project_name.split("-", 2)[:2])
+        base_ref = f"refs/remotes/origin/{self.base_branch}"
+        normalized_title = " ".join(task_title.split()) or task_id
+        safe_title = re.sub(
+            r"[\ud800-\udfff]",
+            "\N{REPLACEMENT CHARACTER}",
+            normalized_title,
+        )
+        self._run(
+            [
+                "git",
+                "--git-dir",
+                str(self.git_dir),
+                "worktree",
+                "prune",
+            ]
+        )
+        with tempfile.TemporaryDirectory(
+            dir=self.git_dir.parent,
+            prefix="project-scaffold-",
+        ) as temporary_directory:
+            workspace = Path(temporary_directory) / "worktree"
+            self._run(
+                [
+                    "git",
+                    "--git-dir",
+                    str(self.git_dir),
+                    "worktree",
+                    "add",
+                    "--detach",
+                    str(workspace),
+                    base_ref,
+                ]
+            )
+            try:
+                projects_root = workspace / "projects"
+                if projects_root.is_symlink() or not projects_root.is_dir():
+                    raise RuntimeError("Repository projects path is not a safe directory")
+                project_directory = projects_root / project_name
+                if project_directory.is_symlink():
+                    raise RuntimeError("Project path must not be a symbolic link")
+                if project_directory.exists() and not project_directory.is_dir():
+                    raise RuntimeError("Project path is not a safe directory")
+                if not project_directory.exists():
+                    project_directory.mkdir()
+                    (project_directory / "README.md").write_text(
+                        f"# {task_id} — {safe_title}\n\n"
+                        "Учебный проект по задаче из Yonote.\n\n"
+                        "Начни реализацию в `main.py`.\n",
+                        encoding="utf-8",
+                    )
+                    module_title = f"{task_id}: {safe_title}."
+                    (project_directory / "main.py").write_text(
+                        f"{module_title!r}\n",
+                        encoding="utf-8",
+                    )
+                    self._run(
+                        [
+                            "git",
+                            "-C",
+                            str(workspace),
+                            "add",
+                            "--",
+                            f"projects/{project_name}",
+                        ]
+                    )
+                    self._run(
+                        [
+                            "git",
+                            "-C",
+                            str(workspace),
+                            "commit",
+                            "-m",
+                            f"chore({task_id}): initialize project scaffold",
+                        ]
+                    )
+                return self._run(
+                    ["git", "-C", str(workspace), "rev-parse", "HEAD"]
+                ).strip()
+            finally:
+                self._run(
+                    [
+                        "git",
+                        "--git-dir",
+                        str(self.git_dir),
+                        "worktree",
+                        "remove",
+                        "--force",
+                        str(workspace),
+                    ]
+                )
 
     def _branch_exists(self, branch: str) -> bool:
         output = self._run(
@@ -102,6 +195,10 @@ class GitBranchClient:
             "-o StrictHostKeyChecking=yes "
             f"-o UserKnownHostsFile={self.known_hosts}"
         )
+        env["GIT_AUTHOR_NAME"] = "Yonote GitHub Bridge"
+        env["GIT_AUTHOR_EMAIL"] = "bridge@menti-github.jos-dev.ru"
+        env["GIT_COMMITTER_NAME"] = env["GIT_AUTHOR_NAME"]
+        env["GIT_COMMITTER_EMAIL"] = env["GIT_AUTHOR_EMAIL"]
         return self.runner.run(command, env)
 
     def _branch_url(self, branch: str) -> str:

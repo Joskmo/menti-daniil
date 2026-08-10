@@ -13,7 +13,7 @@ class YonoteGateway(Protocol):
 
 
 class GitHubGateway(Protocol):
-    def ensure_branch(self, branch: str) -> str: ...
+    def ensure_branch(self, branch: str, task_title: str) -> str: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,7 +63,10 @@ class BridgeService:
                 )
             assert mapping.branch_name is not None
             branch_name = mapping.branch_name
-            branch_url = mapping.branch_url or self.github.ensure_branch(branch_name)
+            branch_url = mapping.branch_url or self.github.ensure_branch(
+                branch_name,
+                task.title,
+            )
             if not mapping.branch_url:
                 self.store.record_branch(task.row_id, branch_name, branch_url)
             self.yonote.update_fields(

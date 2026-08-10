@@ -28,9 +28,11 @@ class FakeYonote:
 class FakeGitHub:
     def __init__(self) -> None:
         self.created: list[str] = []
+        self.requests: list[tuple[str, str]] = []
 
-    def ensure_branch(self, branch: str) -> str:
+    def ensure_branch(self, branch: str, task_title: str) -> str:
         self.created.append(branch)
+        self.requests.append((branch, task_title))
         return f"https://github.com/Joskmo/menti-daniil/tree/{branch}"
 
 
@@ -58,6 +60,9 @@ def test_reconcile_creates_one_branch_and_records_it_idempotently(tmp_path) -> N
     service.reconcile_once()
 
     assert github.created == ["task/PY-001-tip-dannyh-input"]
+    assert github.requests == [
+        ("task/PY-001-tip-dannyh-input", "Тип данных input()")
+    ]
     assert yonote.updates == [
         (
             "row-1",
@@ -192,7 +197,7 @@ class AmbiguousPushGitHub:
     def __init__(self) -> None:
         self.calls: list[str] = []
 
-    def ensure_branch(self, branch: str) -> str:
+    def ensure_branch(self, branch: str, task_title: str) -> str:
         self.calls.append(branch)
         if len(self.calls) == 1:
             raise RuntimeError("connection lost after remote accepted push")

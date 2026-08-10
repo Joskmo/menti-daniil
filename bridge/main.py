@@ -24,6 +24,7 @@ def main() -> None:
     schema = YonoteSchemaManager(settings.board_id, transport)
     schema.ensure(
         [
+            DatabaseProperty(settings.project_property_id, "Проект", "text", 2, 160),
             DatabaseProperty(settings.task_id_property_id, "ID задачи", "text", 4, 130),
             DatabaseProperty(settings.branch_property_id, "GitHub branch", "url", 5, 240),
             DatabaseProperty(settings.pr_property_id, "Pull request", "url", 6, 240),
@@ -35,6 +36,7 @@ def main() -> None:
             board_id=settings.board_id,
             status_property_id=settings.status_property_id,
             assignee_property_id=settings.assignee_property_id,
+            project_property_id=settings.project_property_id,
             task_id_property_id=settings.task_id_property_id,
             branch_property_id=settings.branch_property_id,
             pr_property_id=settings.pr_property_id,

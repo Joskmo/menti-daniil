@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Protocol
 
 _BRANCH_PATTERN = re.compile(r"task/PY-\d{3,}-[a-z0-9]+(?:-[a-z0-9]+)*")
+_PROJECT_PATTERN = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
 
 
 class Runner(Protocol):
@@ -46,9 +47,18 @@ class GitBranchClient:
         self.runner = runner or SubprocessRunner()
         self._lock = threading.Lock()
 
-    def ensure_branch(self, branch: str, task_title: str) -> str:
+    def ensure_branch(
+        self,
+        branch: str,
+        project_directory: str,
+    ) -> str:
         if not _BRANCH_PATTERN.fullmatch(branch):
             raise ValueError(f"Unsafe branch name: {branch!r}")
+        if (
+            len(project_directory) > 64
+            or not _PROJECT_PATTERN.fullmatch(project_directory)
+        ):
+            raise ValueError(f"Unsafe project directory: {project_directory!r}")
 
         with self._lock:
             if self._branch_exists(branch):
@@ -69,7 +79,7 @@ class GitBranchClient:
                     f"refs/heads/{self.base_branch}:refs/remotes/origin/{self.base_branch}",
                 ]
             )
-            commit = self._project_commit(branch, task_title)
+            commit = self._project_commit(branch, project_directory)
             self._run(
                 [
                     "git",
@@ -82,16 +92,12 @@ class GitBranchClient:
             )
             return self._branch_url(branch)
 
-    def _project_commit(self, branch: str, task_title: str) -> str:
-        project_name = branch.removeprefix("task/")
-        task_id = "-".join(project_name.split("-", 2)[:2])
+    def _project_commit(
+        self,
+        branch: str,
+        project_name: str,
+    ) -> str:
         base_ref = f"refs/remotes/origin/{self.base_branch}"
-        normalized_title = " ".join(task_title.split()) or task_id
-        safe_title = re.sub(
-            r"[\ud800-\udfff]",
-            "\N{REPLACEMENT CHARACTER}",
-            normalized_title,
-        )
         self._run(
             [
                 "git",
@@ -130,12 +136,12 @@ class GitBranchClient:
                 if not project_directory.exists():
                     project_directory.mkdir()
                     (project_directory / "README.md").write_text(
-                        f"# {task_id} — {safe_title}\n\n"
-                        "Учебный проект по задаче из Yonote.\n\n"
-                        "Начни реализацию в `main.py`.\n",
+                        f"# {project_name}\n\n"
+                        "Учебный проект из Yonote.\n\n"
+                        "Добавь исходный код проекта и тесты.\n",
                         encoding="utf-8",
                     )
-                    module_title = f"{task_id}: {safe_title}."
+                    module_title = f"Учебный проект {project_name}."
                     (project_directory / "main.py").write_text(
                         f"{module_title!r}\n",
                         encoding="utf-8",
@@ -157,7 +163,7 @@ class GitBranchClient:
                             str(workspace),
                             "commit",
                             "-m",
-                            f"chore({task_id}): initialize project scaffold",
+                            f"chore: initialize {project_name} project scaffold",
                         ]
                     )
                 return self._run(

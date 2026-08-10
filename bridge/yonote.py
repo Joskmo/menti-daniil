@@ -7,6 +7,10 @@ from urllib.request import Request, urlopen
 from bridge.models import Task
 
 
+def _text_value(value: object) -> str | None:
+    return value if isinstance(value, str) else None
+
+
 def _url_value(value: object) -> str | None:
     if isinstance(value, str):
         return value
@@ -51,6 +55,7 @@ class YonoteConfig:
     board_id: str
     status_property_id: str
     assignee_property_id: str
+    project_property_id: str
     task_id_property_id: str
     branch_property_id: str
     pr_property_id: str
@@ -124,6 +129,7 @@ class YonoteClient:
         return Task(
             row_id=row["id"],
             title=row.get("title") or "Без названия",
+            project=_text_value(values.get(self.config.project_property_id)),
             status_id=status_values[0] if status_values else None,
             assignee_ids=tuple(assignee_values),
             task_id=values.get(self.config.task_id_property_id),

@@ -85,13 +85,18 @@ def test_deployed_schema_is_migrated_additively(tmp_path) -> None:
 
     mapping = store.find_by_branch("task/PY-001-existing")
     assert mapping is not None
+    assert mapping.project_name is None
     assert mapping.pr_number is None
     assert mapping.pr_state is None
     assert mapping.pr_updated_at is None
     with sqlite3.connect(database) as connection:
+        task_columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(task_mappings)")
+        }
         delivery_columns = {
             row[1] for row in connection.execute("PRAGMA table_info(webhook_deliveries)")
         }
+    assert "project_name" in task_columns
     assert {"event", "payload", "lease_token"} <= delivery_columns
     assert not store.claim_delivery("legacy-completed")
 

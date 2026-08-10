@@ -30,9 +30,13 @@ class FakeGitHub:
         self.created: list[str] = []
         self.requests: list[tuple[str, str]] = []
 
-    def ensure_branch(self, branch: str, task_title: str) -> str:
+    def ensure_branch(
+        self,
+        branch: str,
+        project_directory: str,
+    ) -> str:
         self.created.append(branch)
-        self.requests.append((branch, task_title))
+        self.requests.append((branch, project_directory))
         return f"https://github.com/Joskmo/menti-daniil/tree/{branch}"
 
 
@@ -40,6 +44,7 @@ def test_reconcile_creates_one_branch_and_records_it_idempotently(tmp_path) -> N
     task = Task(
         row_id="row-1",
         title="Тип данных input()",
+        project="json",
         status_id="in-progress",
         assignee_ids=("daniil",),
         task_id=None,
@@ -60,9 +65,7 @@ def test_reconcile_creates_one_branch_and_records_it_idempotently(tmp_path) -> N
     service.reconcile_once()
 
     assert github.created == ["task/PY-001-tip-dannyh-input"]
-    assert github.requests == [
-        ("task/PY-001-tip-dannyh-input", "Тип данных input()")
-    ]
+    assert github.requests == [("task/PY-001-tip-dannyh-input", "json")]
     assert yonote.updates == [
         (
             "row-1",
@@ -81,6 +84,7 @@ def test_reconcile_ignores_tasks_not_in_progress(tmp_path) -> None:
     task = Task(
         row_id="row-1",
         title="Пустой JSON",
+        project="json",
         status_id="planned",
         assignee_ids=("daniil",),
         task_id="PY-001",
@@ -103,10 +107,56 @@ def test_reconcile_ignores_tasks_not_in_progress(tmp_path) -> None:
     assert yonote.updates == []
 
 
+def test_invalid_project_does_not_block_other_tasks(tmp_path) -> None:
+    invalid = Task(
+        row_id="row-invalid",
+        title="Некорректный проект",
+        project="../",
+        status_id="in-progress",
+        assignee_ids=("daniil",),
+        task_id=None,
+        branch_url=None,
+        pr_url=None,
+        created_at="2026-08-09T12:00:00Z",
+    )
+    valid = replace(
+        invalid,
+        row_id="row-valid",
+        title="Корректная задача",
+        project="json",
+        created_at="2026-08-09T13:00:00Z",
+    )
+    yonote = FakeYonote([invalid, valid])
+    github = FakeGitHub()
+    service = BridgeService(
+        settings=BridgeSettings(in_progress_status_id="in-progress", assignee_id="daniil"),
+        yonote=yonote,
+        github=github,
+        store=SQLiteStore(tmp_path / "bridge.db"),
+    )
+
+    service.reconcile_once()
+
+    assert github.requests == [("task/PY-001-korrektnaya-zadacha", "json")]
+    assert yonote.updates == [
+        (
+            "row-valid",
+            {
+                "task_id": "PY-001",
+                "branch_url": (
+                    "https://github.com/Joskmo/menti-daniil/tree/"
+                    "task/PY-001-korrektnaya-zadacha"
+                ),
+            },
+        )
+    ]
+
+
 def test_backfill_assigns_stable_ids_oldest_first(tmp_path) -> None:
     newer = Task(
         row_id="row-2",
         title="Новая задача",
+        project="json",
         status_id="planned",
         assignee_ids=("daniil",),
         task_id=None,
@@ -140,6 +190,7 @@ def test_reconcile_registers_existing_ids_before_allocating_new_one(tmp_path) ->
     existing = Task(
         row_id="row-existing",
         title="Уже запланировано",
+        project="json",
         status_id="planned",
         assignee_ids=("daniil",),
         task_id="PY-007",
@@ -151,6 +202,7 @@ def test_reconcile_registers_existing_ids_before_allocating_new_one(tmp_path) ->
         existing,
         row_id="row-active",
         title="Новая активная задача",
+        project="json",
         status_id="in-progress",
         task_id=None,
         created_at="2026-08-09T12:00:00Z",
@@ -174,6 +226,7 @@ def test_reconcile_fails_closed_on_duplicate_existing_task_ids(tmp_path) -> None
     first = Task(
         row_id="row-1",
         title="Первая",
+        project="json",
         status_id="planned",
         assignee_ids=("daniil",),
         task_id="PY-001",
@@ -195,19 +248,24 @@ def test_reconcile_fails_closed_on_duplicate_existing_task_ids(tmp_path) -> None
 
 class AmbiguousPushGitHub:
     def __init__(self) -> None:
-        self.calls: list[str] = []
+        self.calls: list[tuple[str, str]] = []
 
-    def ensure_branch(self, branch: str, task_title: str) -> str:
-        self.calls.append(branch)
+    def ensure_branch(
+        self,
+        branch: str,
+        project_directory: str,
+    ) -> str:
+        self.calls.append((branch, project_directory))
         if len(self.calls) == 1:
             raise RuntimeError("connection lost after remote accepted push")
         return f"https://github.com/Joskmo/menti-daniil/tree/{branch}"
 
 
-def test_branch_intent_survives_ambiguous_push_and_title_change(tmp_path) -> None:
+def test_branch_intent_survives_ambiguous_push_and_card_edits(tmp_path) -> None:
     task = Task(
         row_id="row-1",
         title="Первоначальное название",
+        project="json",
         status_id="in-progress",
         assignee_ids=("daniil",),
         task_id=None,
@@ -229,11 +287,16 @@ def test_branch_intent_survives_ambiguous_push_and_title_change(tmp_path) -> Non
         service.reconcile_once()
     mapping = store.get_or_allocate("row-1")
     assert mapping.branch_name == "task/PY-001-pervonachalnoe-nazvanie"
+    assert mapping.project_name == "json"
 
-    yonote.tasks["row-1"] = replace(task, title="Переименованная задача")
+    yonote.tasks["row-1"] = replace(
+        task,
+        title="Переименованная задача",
+        project=None,
+    )
     service.reconcile_once()
 
     assert github.calls == [
-        "task/PY-001-pervonachalnoe-nazvanie",
-        "task/PY-001-pervonachalnoe-nazvanie",
+        ("task/PY-001-pervonachalnoe-nazvanie", "json"),
+        ("task/PY-001-pervonachalnoe-nazvanie", "json"),
     ]

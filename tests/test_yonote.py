@@ -16,6 +16,7 @@ def config() -> YonoteConfig:
         board_id="board",
         status_property_id="status-prop",
         assignee_property_id="assignee-prop",
+        project_property_id="project-prop",
         task_id_property_id="task-id-prop",
         branch_property_id="branch-prop",
         pr_property_id="pr-prop",
@@ -34,6 +35,7 @@ def test_list_tasks_maps_yonote_row_values() -> None:
                         "values": {
                             "status-prop": ["planned"],
                             "assignee-prop": ["daniil"],
+                            "project-prop": "json",
                             "task-id-prop": "PY-001",
                             "branch-prop": {
                                 "title": "Task branch",
@@ -56,6 +58,7 @@ def test_list_tasks_maps_yonote_row_values() -> None:
     assert tasks[0].row_id == "row-1"
     assert tasks[0].status_id == "planned"
     assert tasks[0].assignee_ids == ("daniil",)
+    assert tasks[0].project == "json"
     assert tasks[0].task_id == "PY-001"
     assert tasks[0].branch_url == "https://github.test/tree/task/PY-001-pustoy-json"
     assert tasks[0].pr_url == "https://github.test/pull/1"
@@ -80,6 +83,7 @@ def test_list_tasks_tolerates_legacy_and_malformed_url_values() -> None:
                         "title": "Malformed",
                         "createdAt": "",
                         "values": {
+                            "project-prop": {"unexpected": "json"},
                             "branch-prop": {"url": 42},
                             "pr-prop": ["unexpected"],
                         },
@@ -93,6 +97,7 @@ def test_list_tasks_tolerates_legacy_and_malformed_url_values() -> None:
 
     assert legacy.branch_url == "https://github.test/tree/legacy"
     assert legacy.pr_url is None
+    assert malformed.project is None
     assert malformed.branch_url is None
     assert malformed.pr_url is None
 

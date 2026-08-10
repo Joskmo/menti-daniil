@@ -1,4 +1,3 @@
-import ast
 import subprocess
 from pathlib import Path
 
@@ -29,7 +28,10 @@ def test_existing_branch_is_returned_without_push(tmp_path: Path) -> None:
         runner=runner,
     )
 
-    url = client.ensure_branch("task/PY-001-pustoy-json", "Пустой JSON")
+    url = client.ensure_branch(
+        "task/PY-001-pustoy-json",
+        "json",
+    )
 
     assert url == (
         "https://github.com/Joskmo/menti-daniil/tree/task/PY-001-pustoy-json"
@@ -82,7 +84,7 @@ def test_new_branch_contains_project_scaffold_when_directory_is_missing(
     )
     branch = "task/PY-003-konverter-valyut"
 
-    client.ensure_branch(branch, "Конвертер валют")
+    client.ensure_branch(branch, "json")
     monkeypatch.delenv("GIT_DIR")
     monkeypatch.delenv("GIT_WORK_TREE")
 
@@ -90,13 +92,13 @@ def test_new_branch_contains_project_scaffold_when_directory_is_missing(
         "--git-dir",
         str(remote),
         "show",
-        f"refs/heads/{branch}:projects/PY-003-konverter-valyut/README.md",
+        f"refs/heads/{branch}:projects/json/README.md",
     )
     main_py = _git(
         "--git-dir",
         str(remote),
         "show",
-        f"refs/heads/{branch}:projects/PY-003-konverter-valyut/main.py",
+        f"refs/heads/{branch}:projects/json/main.py",
     )
     branch_parent = _git(
         "--git-dir", str(remote), "rev-parse", f"refs/heads/{branch}^"
@@ -104,17 +106,17 @@ def test_new_branch_contains_project_scaffold_when_directory_is_missing(
     current_main = _git("--git-dir", str(remote), "rev-parse", "refs/heads/main")
     assert branch_parent == current_main
     assert readme == (
-        "# PY-003 — Конвертер валют\n\n"
-        "Учебный проект по задаче из Yonote.\n\n"
-        "Начни реализацию в `main.py`."
+        "# json\n\n"
+        "Учебный проект из Yonote.\n\n"
+        "Добавь исходный код проекта и тесты."
     )
-    assert main_py == "'PY-003: Конвертер валют.'"
+    assert main_py == "'Учебный проект json.'"
 
 
 def test_existing_project_is_not_overwritten(tmp_path: Path) -> None:
     remote = _create_remote_with_main(tmp_path)
     seed = tmp_path / "seed"
-    project = seed / "projects" / "PY-004-existing-project"
+    project = seed / "projects" / "json"
     project.mkdir()
     (project / "main.py").write_text("VALUE = 42\n")
     _git("add", ".", cwd=seed)
@@ -131,7 +133,7 @@ def test_existing_project_is_not_overwritten(tmp_path: Path) -> None:
     )
     branch = "task/PY-004-existing-project"
 
-    client.ensure_branch(branch, "Новое название не должно затереть проект")
+    client.ensure_branch(branch, "json")
 
     branch_commit = _git(
         "--git-dir", str(remote), "rev-parse", f"refs/heads/{branch}"
@@ -140,16 +142,84 @@ def test_existing_project_is_not_overwritten(tmp_path: Path) -> None:
         "--git-dir",
         str(remote),
         "show",
-        f"refs/heads/{branch}:projects/PY-004-existing-project/main.py",
+        f"refs/heads/{branch}:projects/json/main.py",
     )
     assert branch_commit == main_commit
     assert existing_code == "VALUE = 42"
 
 
+def test_multiple_tasks_share_one_project_directory(tmp_path: Path) -> None:
+    remote = _create_remote_with_main(tmp_path)
+    client = GitBranchClient(
+        repository_ssh=str(remote),
+        repository_web="https://github.com/Joskmo/menti-daniil",
+        base_branch="main",
+        git_dir=tmp_path / "cache.git",
+        ssh_key=tmp_path / "key",
+        known_hosts=tmp_path / "known_hosts",
+    )
+    first_branch = "task/PY-010-initialize-json"
+    second_branch = "task/PY-011-fix-json-errors"
+    client.ensure_branch(first_branch, "json")
+    client.ensure_branch(second_branch, "json")
+
+    first_project_tree = _git(
+        "--git-dir",
+        str(remote),
+        "rev-parse",
+        f"refs/heads/{first_branch}:projects/json",
+    )
+    second_project_tree = _git(
+        "--git-dir",
+        str(remote),
+        "rev-parse",
+        f"refs/heads/{second_branch}:projects/json",
+    )
+    assert first_project_tree == second_project_tree
+
+    seed = tmp_path / "seed"
+    _git("fetch", "origin", first_branch, second_branch, cwd=seed)
+    _git("merge", "--ff-only", f"origin/{first_branch}", cwd=seed)
+    _git("merge", "--no-edit", f"origin/{second_branch}", cwd=seed)
+
+    paths = _git(
+        "--git-dir",
+        str(remote),
+        "ls-tree",
+        "-r",
+        "--name-only",
+        f"refs/heads/{second_branch}",
+    ).splitlines()
+    assert "projects/json/README.md" in paths
+    assert not any(path.startswith("projects/PY-") for path in paths)
+
+
+@pytest.mark.parametrize("project", ["../json", "a" * 65])
+def test_unsafe_project_directory_is_rejected_before_git_calls(
+    tmp_path: Path,
+    project: str,
+) -> None:
+    runner = FakeRunner([])
+    client = GitBranchClient(
+        repository_ssh="git@github.com:Joskmo/menti-daniil.git",
+        repository_web="https://github.com/Joskmo/menti-daniil",
+        base_branch="main",
+        git_dir=tmp_path / "repo.git",
+        ssh_key=tmp_path / "key",
+        known_hosts=tmp_path / "known_hosts",
+        runner=runner,
+    )
+
+    with pytest.raises(ValueError, match="Unsafe project directory"):
+        client.ensure_branch("task/PY-012-unsafe-project", project)
+
+    assert runner.calls == []
+
+
 def test_project_path_file_collision_fails_without_creating_branch(tmp_path: Path) -> None:
     remote = _create_remote_with_main(tmp_path)
     seed = tmp_path / "seed"
-    collision = seed / "projects" / "PY-005-file-collision"
+    collision = seed / "projects" / "json"
     collision.write_text("not a directory\n")
     _git("add", ".", cwd=seed)
     _git("commit", "-m", "add path collision", cwd=seed)
@@ -165,36 +235,6 @@ def test_project_path_file_collision_fails_without_creating_branch(tmp_path: Pat
     branch = "task/PY-005-file-collision"
 
     with pytest.raises(RuntimeError, match="safe directory"):
-        client.ensure_branch(branch, "Коллизия пути")
+        client.ensure_branch(branch, "json")
 
     assert _git("ls-remote", "--heads", str(remote), f"refs/heads/{branch}") == ""
-
-
-def test_invalid_unicode_in_title_is_replaced_in_scaffold(tmp_path: Path) -> None:
-    remote = _create_remote_with_main(tmp_path)
-    client = GitBranchClient(
-        repository_ssh=str(remote),
-        repository_web="https://github.com/Joskmo/menti-daniil",
-        base_branch="main",
-        git_dir=tmp_path / "cache.git",
-        ssh_key=tmp_path / "key",
-        known_hosts=tmp_path / "known_hosts",
-    )
-    branch = "task/PY-006-invalid-unicode"
-
-    client.ensure_branch(branch, "Некорректный \ud800 заголовок")
-
-    readme = _git(
-        "--git-dir",
-        str(remote),
-        "show",
-        f"refs/heads/{branch}:projects/PY-006-invalid-unicode/README.md",
-    )
-    main_py = _git(
-        "--git-dir",
-        str(remote),
-        "show",
-        f"refs/heads/{branch}:projects/PY-006-invalid-unicode/main.py",
-    )
-    assert "Некорректный � заголовок" in readme
-    ast.parse(main_py)

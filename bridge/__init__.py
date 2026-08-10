@@ -1,0 +1,1 @@
+"""Yonote ↔ GitHub mentoring bridge."""

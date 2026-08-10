@@ -34,4 +34,15 @@ jobs:
         run: ruff check .
 
       - name: Pytest
-        run: pytest
+        run: python -m pytest
+
+      - name: Clean-volume container smoke test
+        run: |
+          docker build --tag menti-github-bridge:test .
+          docker volume create menti-github-bridge-ci-data
+          trap 'docker volume rm --force menti-github-bridge-ci-data' EXIT
+          docker run --rm \
+            --volume menti-github-bridge-ci-data:/data \
+            --entrypoint python \
+            menti-github-bridge:test \
+            -c "from bridge.store import SQLiteStore; SQLiteStore('/data/smoke.db')"

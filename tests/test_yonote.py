@@ -1,0 +1,87 @@
+from bridge.yonote import YonoteClient, YonoteConfig
+
+
+class FakeTransport:
+    def __init__(self, responses: dict[str, dict]) -> None:
+        self.responses = responses
+        self.calls: list[tuple[str, dict]] = []
+
+    def post(self, method: str, payload: dict) -> dict:
+        self.calls.append((method, payload))
+        return self.responses[method]
+
+
+def config() -> YonoteConfig:
+    return YonoteConfig(
+        board_id="board",
+        status_property_id="status-prop",
+        assignee_property_id="assignee-prop",
+        task_id_property_id="task-id-prop",
+        branch_property_id="branch-prop",
+        pr_property_id="pr-prop",
+    )
+
+
+def test_list_tasks_maps_yonote_row_values() -> None:
+    transport = FakeTransport(
+        {
+            "documents.list": {
+                "data": [
+                    {
+                        "id": "row-1",
+                        "title": "Пустой JSON",
+                        "createdAt": "2026-08-09T12:00:00Z",
+                        "values": {
+                            "status-prop": ["planned"],
+                            "assignee-prop": ["daniil"],
+                            "task-id-prop": "PY-001",
+                            "branch-prop": "https://github.test/tree/task/PY-001-pustoy-json",
+                            "pr-prop": "https://github.test/pull/1",
+                        },
+                    }
+                ]
+            }
+        }
+    )
+
+    tasks = YonoteClient(config(), transport).list_tasks()
+
+    assert len(tasks) == 1
+    assert tasks[0].row_id == "row-1"
+    assert tasks[0].status_id == "planned"
+    assert tasks[0].assignee_ids == ("daniil",)
+    assert tasks[0].task_id == "PY-001"
+    assert tasks[0].pr_url == "https://github.test/pull/1"
+
+
+def test_update_fields_uses_property_level_atomic_changes() -> None:
+    transport = FakeTransport({"v2/database/transaction": {"ok": True}})
+    client = YonoteClient(config(), transport)
+
+    client.update_fields(
+        "row-1",
+        {
+            "task_id": "PY-001",
+            "branch_url": "https://github.test/tree/task/PY-001-pustoy-json",
+        },
+    )
+
+    assert transport.calls == [
+        (
+            "v2/database/transaction",
+            {
+                "board": [
+                    {
+                        "path": "rows.row-1.values.task-id-prop",
+                        "op": "add",
+                        "val": "PY-001",
+                    },
+                    {
+                        "path": "rows.row-1.values.branch-prop",
+                        "op": "add",
+                        "val": "https://github.test/tree/task/PY-001-pustoy-json",
+                    },
+                ]
+            },
+        )
+    ]

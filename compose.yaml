@@ -1,0 +1,37 @@
+services:
+  menti-github-bridge:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: menti-github-bridge
+    restart: unless-stopped
+    stop_grace_period: 3m
+    env_file:
+      - .env
+    volumes:
+      - ${BRIDGE_DATA_DIR:-menti-github-bridge-data}:/data
+      - ./.secrets/github_deploy_key:/run/secrets/github_deploy_key:ro
+      - ./.secrets/known_hosts:/run/secrets/known_hosts:ro
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.menti-github-bridge.rule=Host(`${BRIDGE_DOMAIN}`)"
+      - "traefik.http.routers.menti-github-bridge.entrypoints=websecure"
+      - "traefik.http.routers.menti-github-bridge.tls=true"
+      - "traefik.http.routers.menti-github-bridge.service=menti-github-bridge"
+      - "traefik.http.services.menti-github-bridge.loadbalancer.server.port=8080"
+    networks:
+      - web
+
+networks:
+  web:
+    external: true
+
+volumes:
+  menti-github-bridge-data:

@@ -19,7 +19,9 @@ venv/
 .DS_Store
 Thumbs.db
 
-# Secrets
+# Secrets and runtime state
 .env
 .env.*
 !.env.example
+.secrets/
+runtime-data/

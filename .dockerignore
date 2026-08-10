@@ -1,0 +1,13 @@
+.git
+.github
+.venv
+.env
+.env.*
+!.env.example
+.secrets
+runtime-data
+__pycache__
+.pytest_cache
+.ruff_cache
+projects
+tests

@@ -67,8 +67,11 @@ def _create_remote_with_main(tmp_path: Path) -> Path:
 
 def test_new_branch_contains_project_scaffold_when_directory_is_missing(
     tmp_path: Path,
+    monkeypatch,
 ) -> None:
     remote = _create_remote_with_main(tmp_path)
+    monkeypatch.setenv("GIT_DIR", "/untrusted/inherited/repository.git")
+    monkeypatch.setenv("GIT_WORK_TREE", "/untrusted/inherited/worktree")
     client = GitBranchClient(
         repository_ssh=str(remote),
         repository_web="https://github.com/Joskmo/menti-daniil",
@@ -80,6 +83,8 @@ def test_new_branch_contains_project_scaffold_when_directory_is_missing(
     branch = "task/PY-003-konverter-valyut"
 
     client.ensure_branch(branch, "Конвертер валют")
+    monkeypatch.delenv("GIT_DIR")
+    monkeypatch.delenv("GIT_WORK_TREE")
 
     readme = _git(
         "--git-dir",

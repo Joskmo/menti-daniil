@@ -190,6 +190,16 @@ class GitBranchClient:
 
     def _run(self, command: list[str]) -> str:
         env = os.environ.copy()
+        for variable in (
+            "GIT_DIR",
+            "GIT_WORK_TREE",
+            "GIT_INDEX_FILE",
+            "GIT_OBJECT_DIRECTORY",
+            "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+            "GIT_COMMON_DIR",
+            "GIT_NAMESPACE",
+        ):
+            env.pop(variable, None)
         env["GIT_SSH_COMMAND"] = (
             f"ssh -i {self.ssh_key} -o IdentitiesOnly=yes "
             "-o StrictHostKeyChecking=yes "

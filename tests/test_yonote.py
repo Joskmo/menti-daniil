@@ -35,8 +35,14 @@ def test_list_tasks_maps_yonote_row_values() -> None:
                             "status-prop": ["planned"],
                             "assignee-prop": ["daniil"],
                             "task-id-prop": "PY-001",
-                            "branch-prop": "https://github.test/tree/task/PY-001-pustoy-json",
-                            "pr-prop": "https://github.test/pull/1",
+                            "branch-prop": {
+                                "title": "Task branch",
+                                "url": "https://github.test/tree/task/PY-001-pustoy-json",
+                            },
+                            "pr-prop": {
+                                "title": "Pull request",
+                                "url": "https://github.test/pull/1",
+                            },
                         },
                     }
                 ]
@@ -51,7 +57,44 @@ def test_list_tasks_maps_yonote_row_values() -> None:
     assert tasks[0].status_id == "planned"
     assert tasks[0].assignee_ids == ("daniil",)
     assert tasks[0].task_id == "PY-001"
+    assert tasks[0].branch_url == "https://github.test/tree/task/PY-001-pustoy-json"
     assert tasks[0].pr_url == "https://github.test/pull/1"
+
+
+def test_list_tasks_tolerates_legacy_and_malformed_url_values() -> None:
+    transport = FakeTransport(
+        {
+            "documents.list": {
+                "data": [
+                    {
+                        "id": "legacy-row",
+                        "title": "Legacy",
+                        "createdAt": "",
+                        "values": {
+                            "branch-prop": "https://github.test/tree/legacy",
+                            "pr-prop": {"title": "Missing URL"},
+                        },
+                    },
+                    {
+                        "id": "malformed-row",
+                        "title": "Malformed",
+                        "createdAt": "",
+                        "values": {
+                            "branch-prop": {"url": 42},
+                            "pr-prop": ["unexpected"],
+                        },
+                    },
+                ]
+            }
+        }
+    )
+
+    legacy, malformed = YonoteClient(config(), transport).list_tasks()
+
+    assert legacy.branch_url == "https://github.test/tree/legacy"
+    assert legacy.pr_url is None
+    assert malformed.branch_url is None
+    assert malformed.pr_url is None
 
 
 def test_update_fields_uses_property_level_atomic_changes() -> None:
@@ -63,6 +106,7 @@ def test_update_fields_uses_property_level_atomic_changes() -> None:
         {
             "task_id": "PY-001",
             "branch_url": "https://github.test/tree/task/PY-001-pustoy-json",
+            "pr_url": "https://github.test/pull/1",
         },
     )
 
@@ -79,7 +123,18 @@ def test_update_fields_uses_property_level_atomic_changes() -> None:
                     {
                         "path": "rows.row-1.values.branch-prop",
                         "op": "add",
-                        "val": "https://github.test/tree/task/PY-001-pustoy-json",
+                        "val": {
+                            "title": "https://github.test/tree/task/PY-001-pustoy-json",
+                            "url": "https://github.test/tree/task/PY-001-pustoy-json",
+                        },
+                    },
+                    {
+                        "path": "rows.row-1.values.pr-prop",
+                        "op": "add",
+                        "val": {
+                            "title": "https://github.test/pull/1",
+                            "url": "https://github.test/pull/1",
+                        },
                     },
                 ]
             },

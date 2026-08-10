@@ -7,6 +7,15 @@ from urllib.request import Request, urlopen
 from bridge.models import Task
 
 
+def _url_value(value: object) -> str | None:
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict):
+        url = value.get("url")
+        return url if isinstance(url, str) else None
+    return None
+
+
 class Transport(Protocol):
     def post(self, method: str, payload: dict) -> dict: ...
 
@@ -91,11 +100,14 @@ class YonoteClient:
                 )
                 continue
             property_id = property_ids[name]
+            property_value: str | dict[str, str] = value
+            if name in {"branch_url", "pr_url"}:
+                property_value = {"title": value, "url": value}
             changes.append(
                 {
                     "path": f"rows.{row_id}.values.{property_id}",
                     "op": "add",
-                    "val": value,
+                    "val": property_value,
                 }
             )
 
@@ -115,7 +127,7 @@ class YonoteClient:
             status_id=status_values[0] if status_values else None,
             assignee_ids=tuple(assignee_values),
             task_id=values.get(self.config.task_id_property_id),
-            branch_url=values.get(self.config.branch_property_id),
-            pr_url=values.get(self.config.pr_property_id),
+            branch_url=_url_value(values.get(self.config.branch_property_id)),
+            pr_url=_url_value(values.get(self.config.pr_property_id)),
             created_at=row.get("createdAt") or "",
         )

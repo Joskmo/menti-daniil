@@ -273,7 +273,7 @@ def test_grading_attempt_is_idempotent_and_fenced_by_exact_commit_and_suite(tmp_
     assert store.claim_next_mentor_notification() is None
 
 
-def test_grading_retry_backoff_does_not_starve_later_commit_and_eventually_dead_letters(
+def test_grading_retry_backoff_does_not_starve_or_permanently_lose_exact_commit(
     tmp_path,
 ) -> None:
     now = [100.0]
@@ -314,7 +314,25 @@ def test_grading_retry_backoff_does_not_starve_later_commit_and_eventually_dead_
     assert retry is not None and retry.attempt_id == oldest.attempt_id
     assert retry.lease_token is not None
     assert store.release_grading(retry.attempt_id, retry.lease_token, "source-unavailable")
-    assert store.get_grading(oldest.attempt_id).state == "failed"
+    assert store.get_grading(oldest.attempt_id).state == "queued"
+
+    later_retry = store.claim_next_grading()
+    assert later_retry is not None and later_retry.attempt_id == later.attempt_id
+    assert later_retry.lease_token is not None
+    assert store.release_grading(
+        later_retry.attempt_id,
+        later_retry.lease_token,
+        "source-unavailable",
+    )
+    assert store.get_grading(later.attempt_id).state == "queued"
+    assert store.claim_next_grading() is None
+    assert store.claim_next_check_publication() is None
+    assert store.claim_next_mentor_notification() is None
+
+    now[0] = 3_705.0
+    replay = store.claim_next_grading()
+    assert replay is not None and replay.attempt_id == oldest.attempt_id
+    assert replay.attempts == 1
 
 
 def test_grading_schema_migrates_next_attempt_at_additively(tmp_path) -> None:
@@ -346,12 +364,34 @@ def test_grading_schema_migrates_next_attempt_at_additively(tmp_path) -> None:
             )
             """
         )
+        connection.execute(
+            """
+            INSERT INTO grading_attempts (
+                attempt_id, task_id, project, branch_name, commit_sha, suite_hash,
+                state, attempts, last_error_code, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, 'failed', 5, 'source-unavailable', 1, 2)
+            """,
+            (
+                "a" * 64,
+                "PY-002",
+                "json",
+                "task/PY-002-next-id",
+                "b" * 40,
+                "c" * 64,
+            ),
+        )
 
-    GraderStore(database)
+    store = GraderStore(database, clock=lambda: 100.0)
 
     with sqlite3.connect(database) as connection:
         columns = {row[1] for row in connection.execute("PRAGMA table_info(grading_attempts)")}
     assert "next_attempt_at" in columns
+    migrated = store.claim_next_grading()
+    assert migrated is not None
+    assert migrated.attempt_id == "a" * 64
+    assert migrated.attempts == 1
+    assert store.claim_next_check_publication() is None
+    assert store.claim_next_mentor_notification() is None
 
 
 def test_suite_vault_read_only_consumer_never_mutates_filesystem(tmp_path, monkeypatch) -> None:

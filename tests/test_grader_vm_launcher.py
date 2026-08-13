@@ -55,6 +55,7 @@ def test_launcher_client_serializes_source_and_round_trips_one_execution(tmp_pat
     source.mkdir()
     (source / "main.py").write_text("def double(x): return x * 2\n")
     (source / "data.csv").write_text("value\n4\n")
+    (source / "settings.ini").write_bytes(b"mode=strict\r\nnext=yes\r")
     captured = []
 
     def backend(source_files: tuple[dict, ...], execution: dict) -> dict:
@@ -83,6 +84,7 @@ def test_launcher_client_serializes_source_and_round_trips_one_execution(tmp_pat
             (
                 {"path": "data.csv", "content": "value\n4\n"},
                 {"path": "main.py", "content": "def double(x): return x * 2\n"},
+                {"path": "settings.ini", "content": "mode=strict\r\nnext=yes\r"},
             ),
             _execution(),
         )
@@ -99,3 +101,28 @@ def test_launcher_client_rejects_source_symlink(tmp_path) -> None:
 
     with pytest.raises(LauncherProtocolError, match="symlink"):
         UnixVmLauncherClient(tmp_path / "missing.sock").execute(source, _execution())
+
+
+def test_launcher_client_classifies_nul_source_as_student_failure(tmp_path) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "main.py").write_text("def double(x): return x * 2\n")
+    (source / "settings.ini").write_bytes(b"a\x00b")
+
+    response = UnixVmLauncherClient(tmp_path / "missing.sock").execute(source, _execution())
+
+    assert response["status"] == "ok"
+    assert response["observation"]["exception"] == "menti.StudentProcessFailure"
+
+
+def test_launcher_client_classifies_json_expanded_source_as_student_failure(tmp_path) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "main.py").write_text("def double(x): return x * 2\n")
+    for index in range(8):
+        (source / f"data-{index}.ini").write_text("\n" * 200_000)
+
+    response = UnixVmLauncherClient(tmp_path / "missing.sock").execute(source, _execution())
+
+    assert response["status"] == "ok"
+    assert response["observation"]["exception"] == "menti.StudentProcessFailure"

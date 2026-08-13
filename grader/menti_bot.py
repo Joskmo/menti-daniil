@@ -1,18 +1,30 @@
 import json
 import re
+import secrets
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
-from grader.store import GraderStore, MentorNotification
+from grader.mentor_proposal import MentorProposal
+from grader.store import GraderStore, MentorNotification, MentorReview
 
 _TASK_ID = re.compile(r"PY-[0-9]{3,}")
 _NONCE = re.compile(r"[A-Za-z0-9_-]{16,64}")
+_HASH = re.compile(r"[0-9a-f]{64}")
+_CALLBACK = re.compile(r"review:(approve|revise|pause):([A-Za-z0-9_-]{16,32})")
 
 
 class TelegramTransport(Protocol):
-    def send_message(self, chat_id: int, text: str) -> int: ...
+    def send_message(
+        self,
+        chat_id: int,
+        text: str,
+        *,
+        reply_markup: dict[str, Any] | None = None,
+    ) -> int: ...
+
+    def answer_callback_query(self, callback_query_id: str, text: str) -> None: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -24,6 +36,20 @@ class Conversation:
     revision: int
     question: str
     prompt_message_id: int
+    state: str
+    kind: str = "clarification"
+    draft_hash: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ReviewAction:
+    token: str
+    chat_id: int
+    user_id: int
+    task_id: str
+    version: int
+    draft_hash: str
+    message_id: int
     state: str
 
 
@@ -53,10 +79,34 @@ class MentiStateStore:
                     revision INTEGER NOT NULL,
                     question TEXT NOT NULL,
                     prompt_message_id INTEGER NOT NULL,
-                    state TEXT NOT NULL
+                    state TEXT NOT NULL,
+                    kind TEXT NOT NULL DEFAULT 'clarification',
+                    draft_hash TEXT
+                );
+                CREATE TABLE IF NOT EXISTS review_actions (
+                    token TEXT PRIMARY KEY,
+                    chat_id INTEGER NOT NULL,
+                    user_id INTEGER NOT NULL,
+                    task_id TEXT NOT NULL,
+                    version INTEGER NOT NULL,
+                    draft_hash TEXT NOT NULL,
+                    message_id INTEGER NOT NULL DEFAULT 0,
+                    state TEXT NOT NULL,
+                    UNIQUE(task_id, version, draft_hash)
                 );
                 """
             )
+            conversation_columns = {
+                row["name"] for row in connection.execute("PRAGMA table_info(conversations)")
+            }
+            for column, declaration in (
+                ("kind", "TEXT NOT NULL DEFAULT 'clarification'"),
+                ("draft_hash", "TEXT"),
+            ):
+                if column not in conversation_columns:
+                    connection.execute(
+                        f"ALTER TABLE conversations ADD COLUMN {column} {declaration}"
+                    )
         self.path.chmod(0o600)
 
     def is_processed(self, update_id: int) -> bool:
@@ -79,8 +129,8 @@ class MentiStateStore:
                 """
                 INSERT INTO conversations (
                     chat_id, user_id, task_id, nonce, revision, question,
-                    prompt_message_id, state
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'active')
+                    prompt_message_id, state, kind, draft_hash
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)
                 ON CONFLICT(chat_id) DO UPDATE SET
                     user_id = excluded.user_id,
                     task_id = excluded.task_id,
@@ -88,7 +138,9 @@ class MentiStateStore:
                     revision = excluded.revision,
                     question = excluded.question,
                     prompt_message_id = excluded.prompt_message_id,
-                    state = 'active'
+                    state = 'active',
+                    kind = excluded.kind,
+                    draft_hash = excluded.draft_hash
                 """,
                 (
                     conversation.chat_id,
@@ -98,6 +150,8 @@ class MentiStateStore:
                     conversation.revision,
                     conversation.question,
                     conversation.prompt_message_id,
+                    conversation.kind,
+                    conversation.draft_hash,
                 ),
             )
 
@@ -136,6 +190,89 @@ class MentiStateStore:
                 ),
             )
         return cursor.rowcount == 1
+
+    def prepare_review(
+        self,
+        review: MentorReview,
+        *,
+        chat_id: int,
+        user_id: int,
+    ) -> ReviewAction:
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            existing = connection.execute(
+                """
+                SELECT * FROM review_actions
+                WHERE task_id = ? AND version = ? AND draft_hash = ?
+                  AND state IN ('preparing', 'active')
+                """,
+                (review.task_id, review.version, review.draft_hash),
+            ).fetchone()
+            if existing is not None:
+                return ReviewAction(**dict(existing))
+            connection.execute(
+                """
+                UPDATE review_actions SET state = 'expired'
+                WHERE task_id = ? AND state IN ('preparing', 'active')
+                """,
+                (review.task_id,),
+            )
+            token = secrets.token_urlsafe(12)
+            connection.execute(
+                """
+                INSERT INTO review_actions (
+                    token, chat_id, user_id, task_id, version, draft_hash,
+                    message_id, state
+                ) VALUES (?, ?, ?, ?, ?, ?, 0, 'preparing')
+                """,
+                (
+                    token,
+                    chat_id,
+                    user_id,
+                    review.task_id,
+                    review.version,
+                    review.draft_hash,
+                ),
+            )
+        return ReviewAction(
+            token,
+            chat_id,
+            user_id,
+            review.task_id,
+            review.version,
+            review.draft_hash,
+            0,
+            "preparing",
+        )
+
+    def bind_review_message(self, token: str, message_id: int) -> bool:
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE review_actions SET message_id = ?, state = 'active'
+                WHERE token = ? AND state = 'preparing'
+                """,
+                (message_id, token),
+            )
+            return cursor.rowcount == 1
+
+    def review_action(self, token: str) -> ReviewAction | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM review_actions WHERE token = ?", (token,)
+            ).fetchone()
+        return None if row is None else ReviewAction(**dict(row))
+
+    def close_review(self, token: str) -> bool:
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE review_actions SET state = 'closed'
+                WHERE token = ? AND state = 'active'
+                """,
+                (token,),
+            )
+            return cursor.rowcount == 1
 
 
 class MentiBot:
@@ -179,8 +316,11 @@ class MentiBot:
         if clarification is None:
             return "idle"
         current = self.state_store.get(self.allowed_chat_id)
+        if current is not None and current.kind == "mentor_revision" and current.state == "active":
+            return "busy"
         if (
             current is not None
+            and current.kind == "clarification"
             and current.nonce == clarification.nonce
             and current.revision == clarification.revision
         ):
@@ -191,6 +331,32 @@ class MentiBot:
             revision=clarification.revision,
             question=clarification.question,
         )
+        return "sent"
+
+    def sync_pending_mentor_review(self) -> str:
+        review = self.grader_store.next_pending_mentor_review()
+        if review is None:
+            return "idle"
+        conversation = self.state_store.get(self.allowed_chat_id)
+        if conversation is not None and conversation.state == "active":
+            return "busy"
+        action = self.state_store.prepare_review(
+            review,
+            chat_id=self.allowed_chat_id,
+            user_id=self.allowed_user_id,
+        )
+        if action.state == "active" and action.message_id > 0:
+            return "waiting"
+        proposal = MentorProposal.from_output(review.proposal_json)
+        text = _format_mentor_review(review, proposal)
+        markup = _review_markup(action.token)
+        message_id = self.transport.send_message(
+            self.allowed_chat_id,
+            text,
+            reply_markup=markup,
+        )
+        if not self.state_store.bind_review_message(action.token, message_id):
+            raise RuntimeError("mentor review action was lost after delivery")
         return "sent"
 
     def send_clarification(
@@ -234,23 +400,44 @@ class MentiBot:
             return "invalid"
         if self.state_store.is_processed(update_id):
             return "duplicate"
+        callback = update.get("callback_query")
+        if isinstance(callback, dict):
+            result = self._handle_callback(callback)
+            self.state_store.mark_processed(update_id)
+            return result
         message = update.get("message")
-        if not isinstance(message, dict) or not self._authorized(message):
+        if not isinstance(message, dict) or not self._authorized_message(message):
             self.state_store.mark_processed(update_id)
             return "ignored"
+        result = self._handle_message(message)
+        self.state_store.mark_processed(update_id)
+        return result
+
+    def _handle_message(self, message: dict[str, Any]) -> str:
         chat_id = self.allowed_chat_id
         text = message.get("text")
+        conversation = self.state_store.get(chat_id)
         if text == "/cancel":
+            if conversation is not None and conversation.kind == "mentor_revision":
+                assert conversation.draft_hash is not None
+                self.grader_store.cancel_mentor_revision(
+                    conversation.task_id,
+                    conversation.revision,
+                    conversation.draft_hash,
+                )
+                self.state_store.clear_exact(conversation)
+                self.transport.send_message(chat_id, "Изменение отменено. Proposal снова активен.")
+                return "revision-cancelled"
             self.state_store.pause(chat_id, self.allowed_user_id)
-            self.state_store.mark_processed(update_id)
             self.transport.send_message(chat_id, "Диалог поставлен на паузу. /start — продолжить.")
             return "paused"
-        conversation = self.state_store.get(chat_id)
         if text == "/start":
-            self.state_store.mark_processed(update_id)
             if conversation is None:
                 self.transport.send_message(chat_id, "Сейчас нет вопроса, ожидающего ответа.")
                 return "idle"
+            if conversation.kind != "clarification":
+                self.transport.send_message(chat_id, "Ответь на актуальный запрос изменений.")
+                return "waiting"
             self.send_clarification(
                 task_id=conversation.task_id,
                 nonce=conversation.nonce,
@@ -259,27 +446,44 @@ class MentiBot:
             )
             return "resumed"
         if conversation is None or conversation.state != "active":
-            self.state_store.mark_processed(update_id)
             return "expired"
         reply = message.get("reply_to_message")
         reply_id = reply.get("message_id") if isinstance(reply, dict) else None
         if reply_id != conversation.prompt_message_id:
-            self.state_store.mark_processed(update_id)
             self.transport.send_message(
                 chat_id,
                 "Это устаревший вопрос. Ответь на последнее сообщение Menti.",
             )
             return "stale"
-        if not isinstance(text, str) or not text.strip() or len(text.encode("utf-8")) > 1_000:
-            self.state_store.mark_processed(update_id)
-            self.transport.send_message(chat_id, "Нужен короткий текстовый ответ до 1000 символов.")
+        maximum = 4_000 if conversation.kind == "mentor_revision" else 1_000
+        if not isinstance(text, str) or not text.strip() or len(text.encode("utf-8")) > maximum:
+            self.transport.send_message(
+                chat_id,
+                f"Нужен текстовый ответ до {maximum} символов.",
+            )
             return "invalid-answer"
+        if conversation.kind == "mentor_revision":
+            assert conversation.draft_hash is not None
+            accepted = self.grader_store.request_mentor_revision(
+                conversation.task_id,
+                conversation.revision,
+                conversation.draft_hash,
+                text.strip(),
+            )
+            self.state_store.clear_exact(conversation)
+            if not accepted:
+                self.transport.send_message(chat_id, "Этот proposal уже закрыт или устарел.")
+                return "expired"
+            self.transport.send_message(
+                chat_id,
+                f"Правки для {conversation.task_id} приняты. Готовлю новую версию.",
+            )
+            return "revised"
         accepted = self.grader_store.answer_clarification(
             conversation.nonce,
             conversation.revision,
             text.strip(),
         )
-        self.state_store.mark_processed(update_id)
         if not accepted:
             self.state_store.clear_exact(conversation)
             self.transport.send_message(chat_id, "Этот вопрос уже закрыт или устарел.")
@@ -288,7 +492,95 @@ class MentiBot:
         self.transport.send_message(chat_id, f"Ответ для {conversation.task_id} принят.")
         return "answered"
 
-    def _authorized(self, message: dict[str, Any]) -> bool:
+    def _handle_callback(self, callback: dict[str, Any]) -> str:
+        if not self._authorized_callback(callback):
+            return "ignored"
+        callback_id = callback.get("id")
+        data = callback.get("data")
+        message = callback.get("message")
+        match = _CALLBACK.fullmatch(data) if isinstance(data, str) else None
+        if not isinstance(callback_id, str) or match is None or not isinstance(message, dict):
+            return "invalid"
+        action_name, token = match.groups()
+        action = self.state_store.review_action(token)
+        message_id = message.get("message_id")
+        if (
+            action is None
+            or action.state != "active"
+            or action.chat_id != self.allowed_chat_id
+            or action.user_id != self.allowed_user_id
+            or action.message_id != message_id
+        ):
+            self.transport.answer_callback_query(callback_id, "Эта кнопка уже устарела.")
+            return "expired"
+        if action_name == "approve":
+            accepted = self.grader_store.approve_mentor_review(
+                action.task_id, action.version, action.draft_hash
+            )
+            self.state_store.close_review(token)
+            if not accepted:
+                self.transport.answer_callback_query(callback_id, "Proposal уже изменился.")
+                return "expired"
+            self.transport.answer_callback_query(callback_id, "Утверждено")
+            self.transport.send_message(
+                self.allowed_chat_id,
+                f"{action.task_id}: версия {action.version} утверждена. Запускаю KVM acceptance.",
+            )
+            return "approved"
+        if action_name == "pause":
+            accepted = self.grader_store.pause_mentor_review(
+                action.task_id, action.version, action.draft_hash
+            )
+            self.state_store.close_review(token)
+            self.transport.answer_callback_query(
+                callback_id, "Поставлено на паузу" if accepted else "Proposal уже изменился."
+            )
+            return "paused-review" if accepted else "expired"
+        conversation = self.state_store.get(self.allowed_chat_id)
+        if conversation is not None and conversation.state == "active":
+            self.transport.answer_callback_query(
+                callback_id, "Сначала ответь на текущий вопрос или нажми /cancel."
+            )
+            return "busy"
+        accepted = self.grader_store.begin_mentor_revision(
+            action.task_id, action.version, action.draft_hash
+        )
+        if not accepted:
+            self.state_store.close_review(token)
+            self.transport.answer_callback_query(callback_id, "Proposal уже изменился.")
+            return "expired"
+        try:
+            prompt_id = self.transport.send_message(
+                self.allowed_chat_id,
+                (
+                    f"{action.task_id} — что изменить в трактовке, критериях, тест-плане "
+                    "или правильном решении?\n\nОтветь reply-сообщением."
+                ),
+            )
+        except Exception:
+            self.grader_store.cancel_mentor_revision(
+                action.task_id, action.version, action.draft_hash
+            )
+            raise
+        self.state_store.close_review(token)
+        self.state_store.activate(
+            Conversation(
+                chat_id=self.allowed_chat_id,
+                user_id=self.allowed_user_id,
+                task_id=action.task_id,
+                nonce=token,
+                revision=action.version,
+                question="Изменения mentor proposal",
+                prompt_message_id=prompt_id,
+                state="active",
+                kind="mentor_revision",
+                draft_hash=action.draft_hash,
+            )
+        )
+        self.transport.answer_callback_query(callback_id, "Жду твои правки")
+        return "revision-requested"
+
+    def _authorized_message(self, message: dict[str, Any]) -> bool:
         chat = message.get("chat")
         sender = message.get("from")
         return (
@@ -298,6 +590,76 @@ class MentiBot:
             and chat.get("type") == "private"
             and sender.get("id") == self.allowed_user_id
         )
+
+    def _authorized_callback(self, callback: dict[str, Any]) -> bool:
+        sender = callback.get("from")
+        message = callback.get("message")
+        chat = message.get("chat") if isinstance(message, dict) else None
+        return (
+            isinstance(sender, dict)
+            and sender.get("id") == self.allowed_user_id
+            and isinstance(chat, dict)
+            and chat.get("id") == self.allowed_chat_id
+            and chat.get("type") == "private"
+        )
+
+
+def _review_markup(token: str) -> dict[str, Any]:
+    return {
+        "inline_keyboard": [
+            [
+                {"text": "Утвердить", "callback_data": f"review:approve:{token}"},
+                {"text": "Изменить", "callback_data": f"review:revise:{token}"},
+                {"text": "Пауза", "callback_data": f"review:pause:{token}"},
+            ]
+        ]
+    }
+
+
+def _format_mentor_review(review: MentorReview, proposal: MentorProposal) -> str:
+    lines = [
+        f"{review.task_id} — согласование скрытой проверки",
+        f"Проект: {review.project}",
+        f"Starter: {review.starter_sha[:12]}",
+        f"Версия proposal: {review.version}",
+        "",
+        "Трактовка:",
+        proposal.interpretation,
+        "",
+        "Критерии:",
+        *[f"• {item}" for item in proposal.criteria],
+    ]
+    if proposal.decisions:
+        lines.extend(["", "Спорные решения:"])
+        for number, decision in enumerate(proposal.decisions, start=1):
+            lines.append(f"{number}. {decision.question}")
+            for index, option in enumerate(decision.options):
+                marker = "рекомендую" if index == decision.recommended_option else "вариант"
+                lines.append(f"   • {option} — {marker}")
+            lines.append(f"   Почему: {decision.reason}")
+    lines.extend(
+        [
+            "",
+            "План скрытой проверки:",
+            *[f"• {item}" for item in proposal.test_plan],
+            "",
+            "Рекомендуемый подход:",
+            proposal.reference_approach,
+            "",
+            "Предлагаемое правильное решение:",
+            proposal.reference_solution,
+            "",
+            f"TestCritic: {proposal.critic_summary}",
+        ]
+    )
+    text = "\n".join(lines)
+    if len(text) <= 3_950:
+        return text
+    prefix = "\n".join(lines[:-4])
+    suffix = f"\n\nTestCritic: {proposal.critic_summary}"
+    budget = max(200, 3_950 - len(prefix) - len(suffix) - 80)
+    solution = proposal.reference_solution[:budget].rstrip()
+    return f"{prefix}\n\nПредлагаемое правильное решение (сокращено):\n{solution}…{suffix}"
 
 
 def _format_mentor_notification(notification: MentorNotification) -> str:

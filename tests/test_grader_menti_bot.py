@@ -5,11 +5,20 @@ from grader.store import GraderStore
 class FakeTelegram:
     def __init__(self) -> None:
         self.sent = []
+        self.callbacks = []
 
-    def send_message(self, chat_id: int, text: str) -> int:
+    def send_message(self, chat_id: int, text: str, *, reply_markup=None) -> int:
         message_id = 100 + len(self.sent)
-        self.sent.append((chat_id, text, message_id))
+        item = (
+            (chat_id, text, message_id)
+            if reply_markup is None
+            else (chat_id, text, message_id, reply_markup)
+        )
+        self.sent.append(item)
         return message_id
+
+    def answer_callback_query(self, callback_query_id: str, text: str) -> None:
+        self.callbacks.append((callback_query_id, text))
 
 
 def _setup(tmp_path):
@@ -56,6 +65,21 @@ def _message(update_id: int, text: str, reply_to: int | None = None, *, user_id=
     if reply_to is not None:
         message["reply_to_message"] = {"message_id": reply_to}
     return {"update_id": update_id, "message": message}
+
+
+def _callback(update_id: int, data: str, *, user_id=7, message_id=100):
+    return {
+        "update_id": update_id,
+        "callback_query": {
+            "id": f"callback-{update_id}",
+            "from": {"id": user_id},
+            "message": {
+                "message_id": message_id,
+                "chat": {"id": 42, "type": "private"},
+            },
+            "data": data,
+        },
+    }
 
 
 def test_bot_delivers_durable_private_grade_report_once(tmp_path) -> None:
@@ -161,3 +185,98 @@ def test_unauthorized_user_cannot_change_state_or_answer(tmp_path) -> None:
     assert grader.get_authoring("PY-002").state == "needs_clarification"
     assert len(telegram.sent) == 1
     assert (tmp_path / "menti.db").stat().st_mode & 0o777 == 0o600
+
+
+def _mentor_review(store: GraderStore):
+    store.enqueue_authoring(
+        task_id="PY-003",
+        row_id="row-3",
+        project="json",
+        branch_name="task/PY-003-review",
+        starter_sha="d" * 40,
+        assignment_json='{"title":"Review"}',
+    )
+    claimed = store.claim_next_authoring()
+    assert claimed is not None
+    return store.submit_mentor_review(
+        claimed.task_id,
+        claimed.lease_token,
+        suite_json='{"schema_version":1}',
+        proposal_json=(
+            '{"schema_version":1,"interpretation":"Вернуть следующий ID.",'
+            '"criteria":["Корректный ID."],"decisions":[],'
+            '"test_plan":["Основной сценарий."],'
+            '"reference_approach":"Найти максимум.",'
+            '"reference_solution":"def next_id(rows): return 1",'
+            '"critic_summary":"Одобрено."}'
+        ),
+        critic_verdict_json='{"status":"approved"}',
+    )
+
+
+def test_bot_sends_mentor_proposal_with_versioned_approve_revision_pause_buttons(tmp_path) -> None:
+    grader = GraderStore(tmp_path / "grader.db", clock=lambda: 100.0)
+    review = _mentor_review(grader)
+    telegram = FakeTelegram()
+    state = MentiStateStore(tmp_path / "menti.db")
+    bot = MentiBot(
+        grader_store=grader,
+        state_store=state,
+        transport=telegram,
+        allowed_chat_id=42,
+        allowed_user_id=7,
+    )
+
+    assert bot.sync_pending_mentor_review() == "sent"
+    _, text, message_id, markup = telegram.sent[0]
+    assert "PY-003 — согласование скрытой проверки" in text
+    assert "Трактовка" in text
+    assert "Предлагаемое правильное решение" in text
+    buttons = markup["inline_keyboard"][0]
+    actions = {button["text"]: button["callback_data"] for button in buttons}
+
+    assert (
+        bot.handle_update(_callback(100, actions["Утвердить"], message_id=message_id))
+        == "approved"
+    )
+    assert grader.get_authoring(review.task_id).state == "queued_for_acceptance"
+    assert (
+        bot.handle_update(_callback(101, actions["Утвердить"], message_id=message_id))
+        == "expired"
+    )
+
+
+def test_revision_button_requires_reply_to_current_prompt_and_invalidates_old_callback(
+    tmp_path,
+) -> None:
+    grader = GraderStore(tmp_path / "grader.db", clock=lambda: 100.0)
+    review = _mentor_review(grader)
+    telegram = FakeTelegram()
+    state = MentiStateStore(tmp_path / "menti.db")
+    bot = MentiBot(
+        grader_store=grader,
+        state_store=state,
+        transport=telegram,
+        allowed_chat_id=42,
+        allowed_user_id=7,
+    )
+    assert bot.sync_pending_mentor_review() == "sent"
+    _, _, proposal_message, markup = telegram.sent[0]
+    actions = {
+        button["text"]: button["callback_data"]
+        for row in markup["inline_keyboard"]
+        for button in row
+    }
+
+    assert bot.handle_update(
+        _callback(110, actions["Изменить"], message_id=proposal_message)
+    ) == "revision-requested"
+    revision_prompt = telegram.sent[-1][2]
+    assert bot.handle_update(_message(111, "Вернуть 1.", proposal_message)) == "stale"
+    assert bot.handle_update(_message(112, "Вернуть 1.", revision_prompt)) == "revised"
+    job = grader.get_authoring(review.task_id)
+    assert job.state == "queued"
+    assert job.mentor_revision == "Вернуть 1."
+    assert bot.handle_update(
+        _callback(113, actions["Утвердить"], message_id=proposal_message)
+    ) == "expired"

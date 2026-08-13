@@ -87,6 +87,11 @@ def test_draft_waits_for_exact_versioned_mentor_approval_and_stale_actions_fail(
     assert store.claim_next_authoring() is None
     assert store.next_pending_mentor_review() == review
 
+    assert store.begin_mentor_revision(
+        review.task_id,
+        review.version,
+        review.draft_hash,
+    )
     assert store.request_mentor_revision(
         review.task_id,
         review.version,

@@ -488,7 +488,7 @@ class GraderStore:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
                 """
-                SELECT starter_sha FROM authoring_jobs
+                SELECT starter_sha, state, mentor_draft_hash FROM authoring_jobs
                 WHERE task_id = ? AND state IN ('authoring', 'accepting')
                   AND lease_token = ?
                 """,
@@ -502,6 +502,10 @@ class GraderStore:
                 or stored.task_id != task_id
                 or stored.starter_sha != row["starter_sha"]
                 or not _HASH.fullmatch(stored.suite_hash)
+                or (
+                    row["state"] == "accepting"
+                    and stored.suite_hash != row["mentor_draft_hash"]
+                )
             ):
                 raise RuntimeError("vault promotion returned mismatched suite identity")
             cursor = connection.execute(
@@ -650,6 +654,35 @@ class GraderStore:
             )
             return cursor.rowcount == 1
 
+    def begin_mentor_revision(self, task_id: str, version: int, draft_hash: str) -> bool:
+        if not _valid_review_identity(task_id, version, draft_hash):
+            return False
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE authoring_jobs SET state = 'mentor_revision_requested', updated_at = ?
+                WHERE task_id = ? AND state = 'awaiting_mentor_approval'
+                  AND mentor_review_version = ? AND mentor_draft_hash = ?
+                """,
+                (self.clock(), task_id, version, draft_hash),
+            )
+            return cursor.rowcount == 1
+
+    def cancel_mentor_revision(self, task_id: str, version: int, draft_hash: str) -> bool:
+        if not _valid_review_identity(task_id, version, draft_hash):
+            return False
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE authoring_jobs
+                SET state = 'awaiting_mentor_approval', updated_at = ?
+                WHERE task_id = ? AND state = 'mentor_revision_requested'
+                  AND mentor_review_version = ? AND mentor_draft_hash = ?
+                """,
+                (self.clock(), task_id, version, draft_hash),
+            )
+            return cursor.rowcount == 1
+
     def request_mentor_revision(
         self,
         task_id: str,
@@ -670,7 +703,7 @@ class GraderStore:
                     mentor_proposal_json = NULL, critic_verdict_json = NULL,
                     mentor_draft_hash = NULL, mentor_approved_at = NULL,
                     next_attempt_at = 0, updated_at = ?
-                WHERE task_id = ? AND state = 'awaiting_mentor_approval'
+                WHERE task_id = ? AND state = 'mentor_revision_requested'
                   AND mentor_review_version = ? AND mentor_draft_hash = ?
                 """,
                 (revision, now, task_id, version, draft_hash),

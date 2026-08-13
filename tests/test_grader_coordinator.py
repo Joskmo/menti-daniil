@@ -198,6 +198,7 @@ def test_coordinator_waits_for_mentor_then_freezes_only_approved_exact_draft(tmp
     job = store.get_authoring("PY-002")
     assert job.state == "ready"
     assert vault.load("PY-002").suite_hash == job.suite_hash
+    assert job.suite_hash == review.draft_hash
     assert gate.calls == 1
 
 

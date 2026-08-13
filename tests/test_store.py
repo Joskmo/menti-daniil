@@ -101,6 +101,28 @@ def test_deployed_schema_is_migrated_additively(tmp_path) -> None:
     assert not store.claim_delivery("legacy-completed")
 
 
+def test_failed_retry_is_backed_off_so_later_delivery_can_run(tmp_path) -> None:
+    now = [100.0]
+    store = SQLiteStore(tmp_path / "bridge.db", clock=lambda: now[0])
+    first = store.claim_delivery("delivery-1", "push", b"first")
+    assert first.token is not None
+    assert store.release_delivery("delivery-1", first.token)
+    second = store.claim_delivery("delivery-2", "push", b"second")
+    assert second.token is not None
+    assert store.release_delivery("delivery-2", second.token)
+
+    work = store.claim_next_delivery()
+    assert work is not None and work.delivery_id == "delivery-1"
+    assert store.release_delivery(work.delivery_id, work.token, delay_seconds=30)
+
+    next_work = store.claim_next_delivery()
+    assert next_work is not None and next_work.delivery_id == "delivery-2"
+    now[0] = 131.0
+    assert store.release_delivery(next_work.delivery_id, next_work.token)
+    retried = store.claim_next_delivery()
+    assert retried is not None and retried.delivery_id == "delivery-1"
+
+
 def test_retry_worker_reclaims_expired_payload_with_new_fence(tmp_path) -> None:
     now = [100.0]
     store = SQLiteStore(

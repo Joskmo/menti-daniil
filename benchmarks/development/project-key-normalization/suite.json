@@ -1,0 +1,129 @@
+{
+  "schema_version": 1,
+  "status": "ready",
+  "summary": "Проверяет строгую нормализацию ASCII key.",
+  "clarification": null,
+  "rubric": [
+    {
+      "id": "normalization",
+      "description": "Нормализует только допустимый ASCII key.",
+      "weight": 1
+    }
+  ],
+  "cases": [
+    {
+      "id": "basic",
+      "rubric_id": "normalization",
+      "adapter": "python_call",
+      "target": "main:normalize_key",
+      "input": {
+        "args": [
+          "  My Project  "
+        ],
+        "kwargs": {},
+        "files": []
+      },
+      "expect": {
+        "return": "my-project",
+        "exception": null,
+        "stdout": null,
+        "files": []
+      }
+    },
+    {
+      "id": "separator-runs",
+      "rubric_id": "normalization",
+      "adapter": "python_call",
+      "target": "main:normalize_key",
+      "input": {
+        "args": [
+          "a__  --b"
+        ],
+        "kwargs": {},
+        "files": []
+      },
+      "expect": {
+        "return": "a-b",
+        "exception": null,
+        "stdout": null,
+        "files": []
+      }
+    },
+    {
+      "id": "edge-separators",
+      "rubric_id": "normalization",
+      "adapter": "python_call",
+      "target": "main:normalize_key",
+      "input": {
+        "args": [
+          "___A___"
+        ],
+        "kwargs": {},
+        "files": []
+      },
+      "expect": {
+        "return": "a",
+        "exception": null,
+        "stdout": null,
+        "files": []
+      }
+    },
+    {
+      "id": "unicode",
+      "rubric_id": "normalization",
+      "adapter": "python_call",
+      "target": "main:normalize_key",
+      "input": {
+        "args": [
+          "Проект"
+        ],
+        "kwargs": {},
+        "files": []
+      },
+      "expect": {
+        "return": null,
+        "exception": "ValueError",
+        "stdout": null,
+        "files": []
+      }
+    },
+    {
+      "id": "punctuation",
+      "rubric_id": "normalization",
+      "adapter": "python_call",
+      "target": "main:normalize_key",
+      "input": {
+        "args": [
+          "a.b"
+        ],
+        "kwargs": {},
+        "files": []
+      },
+      "expect": {
+        "return": null,
+        "exception": "ValueError",
+        "stdout": null,
+        "files": []
+      }
+    },
+    {
+      "id": "empty",
+      "rubric_id": "normalization",
+      "adapter": "python_call",
+      "target": "main:normalize_key",
+      "input": {
+        "args": [
+          " __ - "
+        ],
+        "kwargs": {},
+        "files": []
+      },
+      "expect": {
+        "return": null,
+        "exception": "ValueError",
+        "stdout": null,
+        "files": []
+      }
+    }
+  ]
+}

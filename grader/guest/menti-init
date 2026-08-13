@@ -1,0 +1,13 @@
+#!/bin/sh
+set -eu
+
+mkdir -p /proc /sys /dev /input /work
+mount -t proc -o nosuid,nodev,noexec proc /proc || true
+mount -t sysfs -o ro,nosuid,nodev,noexec sysfs /sys || true
+mount -t devtmpfs -o nosuid,noexec devtmpfs /dev || true
+mount -t ext4 -o ro,nosuid,nodev,noexec /dev/vdb /input
+mount -t tmpfs -o rw,nosuid,nodev,noexec,size=96m,mode=0711 tmpfs /work
+
+/usr/bin/python3 /opt/menti/guest_supervisor.py /input/request.json
+sync
+poweroff -f || reboot -f

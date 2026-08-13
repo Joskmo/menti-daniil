@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "id": "ambiguous-id-policy",
+  "tier": "development",
+  "task_id": "BENCH-003",
+  "project": "ambiguous-id",
+  "title": "Распределение ID",
+  "description": "Реализуйте функцию allocate_id(rows), которая возвращает следующий ID для новой записи. Других правил выбора ID нет.",
+  "expected_status": "clarification_required",
+  "minimum_mutation_score": 1.0
+}

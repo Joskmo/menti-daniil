@@ -12,3 +12,4 @@ class Task:
     branch_url: str | None
     pr_url: str | None
     created_at: str
+    description: str = ""

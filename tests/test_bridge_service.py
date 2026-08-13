@@ -30,14 +30,77 @@ class FakeGitHub:
         self.created: list[str] = []
         self.requests: list[tuple[str, str]] = []
 
-    def ensure_branch(
+    def prepare_branch(
         self,
         branch: str,
         project_directory: str,
     ) -> str:
         self.created.append(branch)
         self.requests.append((branch, project_directory))
+        return "a" * 40
+
+    def ensure_prepared_branch(self, branch: str, starter_sha: str) -> str:
+        assert branch in self.created
+        assert starter_sha == "a" * 40
         return f"https://github.com/Joskmo/menti-daniil/tree/{branch}"
+
+
+class FakeGrader:
+    def __init__(self, state: str = "queued") -> None:
+        self.state = state
+        self.requests: list[tuple[Task, str, str]] = []
+
+    def ensure_suite(self, task: Task, branch_name: str, starter_sha: str) -> str:
+        self.requests.append((task, branch_name, starter_sha))
+        return self.state
+
+
+def test_learner_branch_url_is_withheld_until_hidden_suite_is_ready(tmp_path) -> None:
+    task = Task(
+        row_id="row-learner",
+        title="Исправить ID",
+        project="json",
+        status_id="in-progress",
+        assignee_ids=("daniil",),
+        task_id=None,
+        branch_url=None,
+        pr_url=None,
+        created_at="2026-08-10T12:00:00Z",
+        description="Вернуть максимальный ID плюс один.",
+    )
+    yonote = FakeYonote([task])
+    github = FakeGitHub()
+    grader = FakeGrader()
+    service = BridgeService(
+        settings=BridgeSettings(in_progress_status_id="in-progress", assignee_id="daniil"),
+        yonote=yonote,
+        github=github,
+        store=SQLiteStore(tmp_path / "bridge.db"),
+        grader=grader,
+    )
+
+    service.reconcile_once()
+
+    assert github.created == ["task/PY-001-ispravit-id"]
+    assert yonote.updates == []
+    assert grader.requests[0][0].description == "Вернуть максимальный ID плюс один."
+    assert grader.requests[0][2] == "a" * 40
+
+    grader.state = "ready"
+    service.reconcile_once()
+
+    assert github.created == ["task/PY-001-ispravit-id"]
+    assert yonote.updates == [
+        (
+            "row-learner",
+            {
+                "task_id": "PY-001",
+                "branch_url": (
+                    "https://github.com/Joskmo/menti-daniil/tree/task/PY-001-ispravit-id"
+                ),
+            },
+        )
+    ]
 
 
 def test_reconcile_creates_one_branch_and_records_it_idempotently(tmp_path) -> None:
@@ -78,6 +141,80 @@ def test_reconcile_creates_one_branch_and_records_it_idempotently(tmp_path) -> N
             },
         )
     ]
+
+
+def test_existing_branch_with_confirmed_starter_reconciles_grader_registration(
+    tmp_path,
+) -> None:
+    branch = "task/PY-001-sushchestvuyushchaya-zadacha"
+    branch_url = f"https://github.com/Joskmo/menti-daniil/tree/{branch}"
+    task = Task(
+        row_id="row-legacy",
+        title="Существующая задача",
+        project="json",
+        status_id="in-progress",
+        assignee_ids=("daniil",),
+        task_id="PY-001",
+        branch_url=branch_url,
+        pr_url=None,
+        created_at="2026-08-09T12:00:00Z",
+        description="Исправить существующее решение.",
+    )
+    yonote = FakeYonote([task])
+    github = FakeGitHub()
+    grader = FakeGrader("ready")
+    store = SQLiteStore(tmp_path / "bridge.db")
+    store.get_or_allocate("row-legacy", "PY-001")
+    store.reserve_branch("row-legacy", branch, "json")
+    store.record_branch("row-legacy", branch, branch_url)
+    store.record_starter_sha("row-legacy", "a" * 40)
+    service = BridgeService(
+        settings=BridgeSettings(in_progress_status_id="in-progress", assignee_id="daniil"),
+        yonote=yonote,
+        github=github,
+        store=store,
+        grader=grader,
+    )
+
+    service.reconcile_once()
+
+    assert github.created == []
+    assert grader.requests == [(task, branch, "a" * 40)]
+    assert yonote.updates == []
+
+
+def test_existing_branch_without_confirmed_starter_is_not_guessed(tmp_path) -> None:
+    branch = "task/PY-001-existing"
+    task = Task(
+        row_id="row-legacy",
+        title="Существующая задача",
+        project="json",
+        status_id="in-progress",
+        assignee_ids=("daniil",),
+        task_id="PY-001",
+        branch_url=f"https://github.com/Joskmo/menti-daniil/tree/{branch}",
+        pr_url=None,
+        created_at="2026-08-09T12:00:00Z",
+    )
+    store = SQLiteStore(tmp_path / "bridge.db")
+    store.get_or_allocate("row-legacy", "PY-001")
+    store.reserve_branch("row-legacy", branch, "json")
+    grader = FakeGrader("ready")
+    github = FakeGitHub()
+    service = BridgeService(
+        settings=BridgeSettings(in_progress_status_id="in-progress", assignee_id="daniil"),
+        yonote=FakeYonote([task]),
+        github=github,
+        store=store,
+        grader=grader,
+    )
+
+    service.reconcile_once()
+
+    assert github.created == []
+    assert grader.requests == []
+    mapping = store.find_by_row("row-legacy")
+    assert mapping is not None and mapping.starter_sha is None
 
 
 def test_reconcile_creates_branch_for_mentor_assignee(tmp_path) -> None:
@@ -292,12 +429,15 @@ class AmbiguousPushGitHub:
     def __init__(self) -> None:
         self.calls: list[tuple[str, str]] = []
 
-    def ensure_branch(
+    def prepare_branch(
         self,
         branch: str,
         project_directory: str,
     ) -> str:
-        self.calls.append((branch, project_directory))
+        return "a" * 40
+
+    def ensure_prepared_branch(self, branch: str, starter_sha: str) -> str:
+        self.calls.append((branch, starter_sha))
         if len(self.calls) == 1:
             raise RuntimeError("connection lost after remote accepted push")
         return f"https://github.com/Joskmo/menti-daniil/tree/{branch}"
@@ -339,6 +479,6 @@ def test_branch_intent_survives_ambiguous_push_and_card_edits(tmp_path) -> None:
     service.reconcile_once()
 
     assert github.calls == [
-        ("task/PY-001-pervonachalnoe-nazvanie", "json"),
-        ("task/PY-001-pervonachalnoe-nazvanie", "json"),
+        ("task/PY-001-pervonachalnoe-nazvanie", "a" * 40),
+        ("task/PY-001-pervonachalnoe-nazvanie", "a" * 40),
     ]

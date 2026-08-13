@@ -10,8 +10,30 @@ from bridge.service import BridgeService, BridgeSettings
 from bridge.store import SQLiteStore
 from bridge.web import WebApplication, create_server, serve_until_stopped
 from bridge.yonote import HttpTransport, YonoteClient, YonoteConfig
+from grader.gateway import SQLiteGraderGateway
+from grader.store import GraderStore
 
 _LOG = logging.getLogger("menti-github-bridge")
+
+
+def _create_webhook(
+    settings: Settings,
+    store: SQLiteStore,
+    yonote: YonoteClient,
+    grader: SQLiteGraderGateway | None,
+) -> GitHubWebhookHandler:
+    return GitHubWebhookHandler(
+        settings.github_webhook_secret,
+        settings.repository,
+        settings.base_branch,
+        settings.review_status_id,
+        settings.done_status_id,
+        settings.in_progress_status_id,
+        store,
+        yonote,
+        GitHubApiPullRequestLookup(),
+        grader,
+    )
 
 
 def main() -> None:
@@ -44,6 +66,11 @@ def main() -> None:
         transport,
     )
     store = SQLiteStore(settings.database_path)
+    grader = (
+        SQLiteGraderGateway(GraderStore(settings.grader_database_path))
+        if settings.grader_database_path is not None
+        else None
+    )
     github = GitBranchClient(
         repository_ssh=settings.repository_ssh,
         repository_web=settings.repository_web,
@@ -61,18 +88,9 @@ def main() -> None:
         yonote,
         github,
         store,
+        grader,
     )
-    webhook = GitHubWebhookHandler(
-        settings.github_webhook_secret,
-        settings.repository,
-        settings.base_branch,
-        settings.review_status_id,
-        settings.done_status_id,
-        settings.in_progress_status_id,
-        store,
-        yonote,
-        GitHubApiPullRequestLookup(),
-    )
+    webhook = _create_webhook(settings, store, yonote, grader)
     app = WebApplication(webhook, service, settings.yonote_webhook_path_secret)
 
     stop = threading.Event()

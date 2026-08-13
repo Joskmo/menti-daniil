@@ -136,4 +136,5 @@ class YonoteClient:
             branch_url=_url_value(values.get(self.config.branch_property_id)),
             pr_url=_url_value(values.get(self.config.pr_property_id)),
             created_at=row.get("createdAt") or "",
+            description=_text_value(row.get("text")) or "",
         )

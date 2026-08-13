@@ -4,11 +4,15 @@ import io
 import json
 import sqlite3
 from collections.abc import Callable
+from typing import Any
 
 import pytest
 
 from bridge.github_webhook import GitHubApiPullRequestLookup, GitHubWebhookHandler
+from bridge.models import Task
 from bridge.store import SQLiteStore
+from grader.gateway import SQLiteGraderGateway
+from grader.store import GraderStore
 
 REPOSITORY = "Joskmo/menti-daniil"
 BRANCH = "task/PY-001-pustoy-json"
@@ -29,6 +33,18 @@ def signed(secret: str, payload: bytes) -> str:
     return "sha256=" + hmac.new(secret.encode(), payload, hashlib.sha256).hexdigest()
 
 
+class FakeCommitGrader:
+    def __init__(self, *, fail: bool = False) -> None:
+        self.fail = fail
+        self.calls: list[tuple[str, str, str, str]] = []
+
+    def enqueue_commit(self, task_id, project, branch_name, commit_sha):
+        self.calls.append((task_id, project, branch_name, commit_sha))
+        if self.fail:
+            raise RuntimeError("suite not ready")
+        return object()
+
+
 class FakePullRequestLookup:
     def __init__(self, state: str, updated_at: str) -> None:
         self.state = state
@@ -43,15 +59,19 @@ class FakePullRequestLookup:
 
 
 def make_handler(
-    tmp_path, pull_request_lookup: FakePullRequestLookup | None = None
+    tmp_path,
+    pull_request_lookup: FakePullRequestLookup | None = None,
+    grader: Any | None = None,
 ) -> tuple[SQLiteStore, FakeYonote, GitHubWebhookHandler]:
     store = SQLiteStore(tmp_path / "bridge.db")
     store.get_or_allocate("row-1", "PY-001")
+    store.reserve_branch("row-1", BRANCH, "json")
     store.record_branch(
         "row-1",
         BRANCH,
         f"https://github.com/{REPOSITORY}/tree/{BRANCH}",
     )
+    store.record_starter_sha("row-1", "a" * 40)
     yonote = FakeYonote()
     handler = GitHubWebhookHandler(
         secret="secret",
@@ -63,6 +83,7 @@ def make_handler(
         store=store,
         yonote=yonote,
         pull_request_lookup=pull_request_lookup,
+        grader=grader,
     )
     return store, yonote, handler
 
@@ -99,6 +120,27 @@ def pull_request_payload(
                     "repo": {"full_name": base_repository},
                 },
             },
+        }
+    ).encode()
+
+
+def push_payload(
+    *,
+    repository: str = REPOSITORY,
+    branch: str = BRANCH,
+    after: str = "b" * 40,
+    created: bool = False,
+    deleted: bool = False,
+) -> bytes:
+    before = "0" * 40 if created else "a" * 40
+    return json.dumps(
+        {
+            "repository": {"full_name": repository},
+            "ref": f"refs/heads/{branch}",
+            "before": before,
+            "after": after,
+            "created": created,
+            "deleted": deleted,
         }
     ).encode()
 
@@ -152,6 +194,98 @@ def test_invalid_hmac_is_rejected_before_delivery_claim(tmp_path, signature: str
 
     assert delivery_status(store, "delivery-invalid-hmac") is None
     assert yonote.updates == []
+
+
+def test_push_enqueues_exact_mapped_commit_idempotently(tmp_path) -> None:
+    grader = FakeCommitGrader()
+    _, _, handler = make_handler(tmp_path, grader=grader)
+    payload = push_payload()
+    signature = signed("secret", payload)
+
+    assert handler.handle("push", "push-1", signature, payload)
+    assert not handler.handle("push", "push-1", signature, payload)
+    assert grader.calls == [("PY-001", "json", BRANCH, "b" * 40)]
+
+
+def test_initial_starter_branch_creation_push_is_not_graded(tmp_path) -> None:
+    grader = FakeCommitGrader()
+    _, _, handler = make_handler(tmp_path, grader=grader)
+    payload = push_payload(created=True, after="a" * 40)
+
+    assert handler.handle("push", "push-created", signed("secret", payload), payload)
+    assert grader.calls == []
+
+
+def test_recreated_branch_push_at_descendant_commit_is_graded(tmp_path) -> None:
+    grader = FakeCommitGrader()
+    _, _, handler = make_handler(tmp_path, grader=grader)
+    payload = push_payload(created=True, after="b" * 40)
+
+    assert handler.handle("push", "push-recreated", signed("secret", payload), payload)
+    assert grader.calls == [("PY-001", "json", BRANCH, "b" * 40)]
+
+
+def test_push_with_incomplete_legacy_mapping_remains_retryable(tmp_path) -> None:
+    grader = FakeCommitGrader()
+    store, _, handler = make_handler(tmp_path, grader=grader)
+    with sqlite3.connect(store.path) as connection:
+        connection.execute(
+            "UPDATE task_mappings SET project_name = NULL WHERE row_id = 'row-1'"
+        )
+    payload = push_payload()
+
+    with pytest.raises(RuntimeError, match="mapping identity"):
+        handler.handle("push", "push-legacy", signed("secret", payload), payload)
+
+    assert delivery_status(store, "push-legacy") == "pending"
+    assert grader.calls == []
+
+
+def test_push_without_authoring_identity_remains_pending_until_suite_exists(tmp_path) -> None:
+    grader_store = GraderStore(tmp_path / "grader.db", clock=lambda: 100.0)
+    gateway = SQLiteGraderGateway(grader_store)
+    store, _, handler = make_handler(tmp_path, grader=gateway)
+    payload = push_payload()
+
+    with pytest.raises(RuntimeError, match="identity"):
+        handler.handle("push", "push-race", signed("secret", payload), payload)
+    assert delivery_status(store, "push-race") == "pending"
+
+    gateway.ensure_suite(
+        Task(
+            row_id="row-1",
+            title="Пустой JSON",
+            project="json",
+            status_id="in-progress",
+            assignee_ids=("daniil",),
+            task_id="PY-001",
+            branch_url=None,
+            pr_url=None,
+            created_at="2026-08-10T12:00:00Z",
+            description="Исправить обработку JSON.",
+        ),
+        BRANCH,
+        "a" * 40,
+    )
+    claimed = grader_store.claim_next_authoring()
+    assert claimed is not None and claimed.lease_token is not None
+    grader_store.mark_authoring_ready("PY-001", claimed.lease_token, "c" * 64)
+
+    assert handler.retry_pending_once()
+    attempt = grader_store.claim_next_grading()
+    assert attempt is not None and attempt.commit_sha == "b" * 40
+    assert delivery_status(store, "push-race") == "completed"
+
+
+def test_push_enqueue_failure_remains_retryable(tmp_path) -> None:
+    grader = FakeCommitGrader(fail=True)
+    store, _, handler = make_handler(tmp_path, grader=grader)
+    payload = push_payload()
+
+    with pytest.raises(RuntimeError, match="suite not ready"):
+        handler.handle("push", "push-retry", signed("secret", payload), payload)
+
+    assert delivery_status(store, "push-retry") == "pending"
 
 
 def test_opened_pull_request_updates_yonote_once(tmp_path) -> None:

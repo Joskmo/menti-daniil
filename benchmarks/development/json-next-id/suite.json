@@ -1,0 +1,180 @@
+{
+  "schema_version": 1,
+  "status": "ready",
+  "summary": "Проверяет вычисление следующего ID.",
+  "clarification": null,
+  "rubric": [
+    {
+      "id": "next-id",
+      "description": "Возвращает max(id) + 1 без изменения порядка.",
+      "weight": 1
+    }
+  ],
+  "cases": [
+    {
+      "id": "empty",
+      "rubric_id": "next-id",
+      "adapter": "python_call",
+      "target": "main:next_id",
+      "input": {
+        "args": [
+          []
+        ],
+        "kwargs": {},
+        "files": []
+      },
+      "expect": {
+        "return": 1,
+        "exception": null,
+        "stdout": null,
+        "files": []
+      }
+    },
+    {
+      "id": "unsorted",
+      "rubric_id": "next-id",
+      "adapter": "python_call",
+      "target": "main:next_id",
+      "input": {
+        "args": [
+          [
+            {
+              "id": 8
+            },
+            {
+              "id": 2
+            }
+          ]
+        ],
+        "kwargs": {},
+        "files": []
+      },
+      "expect": {
+        "return": 9,
+        "exception": null,
+        "stdout": null,
+        "files": []
+      }
+    },
+    {
+      "id": "gapped",
+      "rubric_id": "next-id",
+      "adapter": "python_call",
+      "target": "main:next_id",
+      "input": {
+        "args": [
+          [
+            {
+              "id": 1
+            },
+            {
+              "id": 10
+            },
+            {
+              "id": 4
+            }
+          ]
+        ],
+        "kwargs": {},
+        "files": []
+      },
+      "expect": {
+        "return": 11,
+        "exception": null,
+        "stdout": null,
+        "files": []
+      }
+    },
+    {
+      "id": "duplicates",
+      "rubric_id": "next-id",
+      "adapter": "python_call",
+      "target": "main:next_id",
+      "input": {
+        "args": [
+          [
+            {
+              "id": 5
+            },
+            {
+              "id": 5
+            }
+          ]
+        ],
+        "kwargs": {},
+        "files": []
+      },
+      "expect": {
+        "return": 6,
+        "exception": null,
+        "stdout": null,
+        "files": []
+      }
+    },
+    {
+      "id": "negative-identifiers",
+      "rubric_id": "next-id",
+      "adapter": "python_call",
+      "target": "main:next_id",
+      "input": {
+        "args": [
+          [
+            {
+              "id": -8
+            },
+            {
+              "id": -3
+            },
+            {
+              "id": -12
+            }
+          ]
+        ],
+        "kwargs": {},
+        "files": []
+      },
+      "expect": {
+        "return": -2,
+        "exception": null,
+        "stdout": null,
+        "files": []
+      }
+    },
+    {
+      "id": "preserves-input",
+      "rubric_id": "next-id",
+      "adapter": "python_call",
+      "target": "main:next_id",
+      "input": {
+        "args": [
+          [
+            {
+              "id": 8
+            },
+            {
+              "id": 2
+            }
+          ]
+        ],
+        "kwargs": {},
+        "files": []
+      },
+      "expect": {
+        "return": 9,
+        "exception": null,
+        "stdout": null,
+        "files": [],
+        "args_after": [
+          [
+            {
+              "id": 8
+            },
+            {
+              "id": 2
+            }
+          ]
+        ]
+      }
+    }
+  ]
+}

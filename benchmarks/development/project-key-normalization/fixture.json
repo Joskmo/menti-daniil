@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "id": "project-key-normalization",
+  "tier": "development",
+  "task_id": "BENCH-002",
+  "project": "project-key",
+  "title": "Нормализация project key",
+  "description": "Реализуйте normalize_key(value). Удалите пробелы по краям, преобразуйте ASCII A-Z в нижний регистр, каждую последовательность пробелов, подчёркиваний и дефисов замените одним дефисом и удалите дефисы по краям. Результат должен соответствовать [a-z0-9]+(?:-[a-z0-9]+)*. Для пустого результата, любого non-ASCII символа или иной пунктуации выбросьте ValueError.",
+  "expected_status": "ready",
+  "minimum_mutation_score": 1.0
+}

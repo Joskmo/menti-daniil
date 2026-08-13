@@ -8,6 +8,7 @@ RUN apt-get update \
 
 WORKDIR /app
 COPY --chown=bridge:bridge bridge /app/bridge
+COPY --chown=bridge:bridge grader /app/grader
 
 USER bridge
 EXPOSE 8080

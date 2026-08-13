@@ -30,6 +30,7 @@ class TaskMapping:
     task_id: str
     branch_name: str | None
     project_name: str | None
+    starter_sha: str | None
     branch_url: str | None
     pr_url: str | None
     pr_number: int | None
@@ -71,6 +72,7 @@ class SQLiteStore:
                     task_id TEXT NOT NULL UNIQUE,
                     branch_name TEXT UNIQUE,
                     project_name TEXT,
+                    starter_sha TEXT,
                     branch_url TEXT,
                     pr_url TEXT
                 )
@@ -81,6 +83,7 @@ class SQLiteStore:
             }
             for column, declaration in (
                 ("project_name", "TEXT"),
+                ("starter_sha", "TEXT"),
                 ("pr_number", "INTEGER"),
                 ("pr_state", "TEXT"),
                 ("pr_updated_at", "TEXT"),
@@ -108,6 +111,7 @@ class SQLiteStore:
                 ("lease_expires_at", "REAL"),
                 ("lease_token", "TEXT"),
                 ("completed_at", "REAL"),
+                ("next_attempt_at", "REAL NOT NULL DEFAULT 0"),
             ):
                 if column not in delivery_columns:
                     connection.execute(
@@ -188,6 +192,30 @@ class SQLiteStore:
             ).fetchone()
             assert row is not None
             return self._mapping(row)
+
+    def record_starter_sha(self, row_id: str, starter_sha: str) -> TaskMapping:
+        if re.fullmatch(r"[0-9a-f]{40}", starter_sha) is None:
+            raise ValueError("invalid starter SHA")
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT starter_sha FROM task_mappings WHERE row_id = ?",
+                (row_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"Unknown Yonote row: {row_id}")
+            if row["starter_sha"] not in (None, starter_sha):
+                raise ValueError("starter SHA changed after reservation")
+            connection.execute(
+                "UPDATE task_mappings SET starter_sha = ? WHERE row_id = ?",
+                (starter_sha, row_id),
+            )
+            updated = connection.execute(
+                "SELECT * FROM task_mappings WHERE row_id = ?",
+                (row_id,),
+            ).fetchone()
+            assert updated is not None
+            return self._mapping(updated)
 
     def find_by_row(self, row_id: str) -> TaskMapping | None:
         with self._connect() as connection:
@@ -300,14 +328,15 @@ class SQLiteStore:
                 SELECT delivery_id, event, payload
                 FROM webhook_deliveries
                 WHERE event IS NOT NULL AND payload IS NOT NULL
+                  AND next_attempt_at <= ?
                   AND (
                       status = 'pending'
                       OR (status = 'processing' AND lease_expires_at <= ?)
                   )
-                ORDER BY received_at, rowid
+                ORDER BY next_attempt_at, received_at, rowid
                 LIMIT 1
                 """,
-                (now,),
+                (now, now),
             ).fetchone()
             if row is None:
                 return None
@@ -354,15 +383,25 @@ class SQLiteStore:
                 (self.completed_delivery_retention,),
             )
 
-    def release_delivery(self, delivery_id: str, lease_token: str) -> bool:
+    def release_delivery(
+        self,
+        delivery_id: str,
+        lease_token: str,
+        *,
+        delay_seconds: float = 0,
+    ) -> bool:
+        if delay_seconds < 0:
+            raise ValueError("delay_seconds must not be negative")
+        now = self.clock()
         with self._connect() as connection:
             cursor = connection.execute(
                 """
                 UPDATE webhook_deliveries
-                SET status = 'pending', lease_expires_at = NULL, lease_token = NULL
+                SET status = 'pending', lease_expires_at = NULL, lease_token = NULL,
+                    next_attempt_at = ?
                 WHERE delivery_id = ? AND status = 'processing' AND lease_token = ?
                 """,
-                (delivery_id, lease_token),
+                (now + delay_seconds, delivery_id, lease_token),
             )
             return cursor.rowcount == 1
 
@@ -382,6 +421,7 @@ class SQLiteStore:
             task_id=row["task_id"],
             branch_name=row["branch_name"],
             project_name=row["project_name"],
+            starter_sha=row["starter_sha"],
             branch_url=row["branch_url"],
             pr_url=row["pr_url"],
             pr_number=row["pr_number"],

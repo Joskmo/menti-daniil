@@ -40,6 +40,12 @@ class AuthoringJob:
     clarification_question: str | None
     clarification_answer: str | None
     critic_feedback_json: str | None
+    mentor_review_version: int
+    mentor_draft_hash: str | None
+    mentor_revision: str | None
+    draft_suite_json: str | None
+    mentor_proposal_json: str | None
+    critic_verdict_json: str | None
     last_error_code: str | None
 
 
@@ -86,6 +92,16 @@ class Clarification:
     task_id: str
     revision: int
     question: str
+
+
+@dataclass(frozen=True, slots=True)
+class MentorReview:
+    task_id: str
+    project: str
+    starter_sha: str
+    version: int
+    draft_hash: str
+    proposal_json: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -146,6 +162,13 @@ class GraderStore:
                     clarification_question TEXT,
                     clarification_answer TEXT,
                     critic_feedback_json TEXT,
+                    mentor_review_version INTEGER NOT NULL DEFAULT 0,
+                    mentor_draft_hash TEXT,
+                    mentor_revision TEXT,
+                    draft_suite_json TEXT,
+                    mentor_proposal_json TEXT,
+                    critic_verdict_json TEXT,
+                    mentor_approved_at REAL,
                     last_error_code TEXT,
                     next_attempt_at REAL NOT NULL DEFAULT 0,
                     created_at REAL NOT NULL,
@@ -159,6 +182,13 @@ class GraderStore:
             }
             for column, declaration in (
                 ("critic_feedback_json", "TEXT"),
+                ("mentor_review_version", "INTEGER NOT NULL DEFAULT 0"),
+                ("mentor_draft_hash", "TEXT"),
+                ("mentor_revision", "TEXT"),
+                ("draft_suite_json", "TEXT"),
+                ("mentor_proposal_json", "TEXT"),
+                ("critic_verdict_json", "TEXT"),
+                ("mentor_approved_at", "REAL"),
                 ("last_error_code", "TEXT"),
                 ("next_attempt_at", "REAL NOT NULL DEFAULT 0"),
             ):
@@ -367,9 +397,14 @@ class GraderStore:
             cursor = connection.execute(
                 """
                 UPDATE authoring_jobs
-                SET state = 'queued', lease_token = NULL, lease_expires_at = NULL,
+                SET state = CASE
+                        WHEN state = 'accepting' THEN 'queued_for_acceptance'
+                        ELSE 'queued'
+                    END,
+                    lease_token = NULL, lease_expires_at = NULL,
                     updated_at = ?
-                WHERE task_id = ? AND state = 'authoring' AND lease_token = ?
+                WHERE task_id = ? AND state IN ('authoring', 'accepting')
+                  AND lease_token = ?
                 """,
                 (self.clock(), task_id, lease_token),
             )
@@ -392,9 +427,13 @@ class GraderStore:
                 """
                 UPDATE authoring_jobs
                 SET state = 'queued', critic_feedback_json = ?,
+                    draft_suite_json = NULL, mentor_proposal_json = NULL,
+                    critic_verdict_json = NULL, mentor_draft_hash = NULL,
+                    mentor_approved_at = NULL,
                     lease_token = NULL, lease_expires_at = NULL,
                     next_attempt_at = ?, updated_at = ?
-                WHERE task_id = ? AND state = 'authoring' AND lease_token = ?
+                WHERE task_id = ? AND state IN ('authoring', 'accepting')
+                  AND lease_token = ?
                 """,
                 (feedback_json, now + delay_seconds, now, task_id, lease_token),
             )
@@ -415,7 +454,8 @@ class GraderStore:
                 UPDATE authoring_jobs
                 SET state = 'failed', last_error_code = ?, lease_token = NULL,
                     lease_expires_at = NULL, updated_at = ?
-                WHERE task_id = ? AND state = 'authoring' AND lease_token = ?
+                WHERE task_id = ? AND state IN ('authoring', 'accepting')
+                  AND lease_token = ?
                 """,
                 (error_code, self.clock(), task_id, lease_token),
             )
@@ -449,7 +489,8 @@ class GraderStore:
             row = connection.execute(
                 """
                 SELECT starter_sha FROM authoring_jobs
-                WHERE task_id = ? AND state = 'authoring' AND lease_token = ?
+                WHERE task_id = ? AND state IN ('authoring', 'accepting')
+                  AND lease_token = ?
                 """,
                 (task_id, lease_token),
             ).fetchone()
@@ -468,7 +509,8 @@ class GraderStore:
                 UPDATE authoring_jobs
                 SET state = 'ready', suite_hash = ?, lease_token = NULL,
                     lease_expires_at = NULL, updated_at = ?
-                WHERE task_id = ? AND state = 'authoring' AND lease_token = ?
+                WHERE task_id = ? AND state IN ('authoring', 'accepting')
+                  AND lease_token = ?
                 """,
                 (stored.suite_hash, self.clock(), task_id, lease_token),
             )
@@ -516,6 +558,184 @@ class GraderStore:
                 (revision, question, now, task_id, lease_token),
             )
         return Clarification(nonce, task_id, revision, question)
+
+    def submit_mentor_review(
+        self,
+        task_id: str,
+        lease_token: str,
+        *,
+        suite_json: str,
+        proposal_json: str,
+        critic_verdict_json: str,
+    ) -> MentorReview:
+        suite_json = _canonical_json_object(suite_json, "draft suite", 1_000_000)
+        proposal_json = _canonical_json_object(proposal_json, "mentor proposal", 100_000)
+        critic_verdict_json = _canonical_json_object(
+            critic_verdict_json, "critic verdict", 100_000
+        )
+        draft_hash = hashlib.sha256(suite_json.encode("utf-8")).hexdigest()
+        now = self.clock()
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                """
+                SELECT project, starter_sha, mentor_review_version
+                FROM authoring_jobs
+                WHERE task_id = ? AND state = 'authoring' AND lease_token = ?
+                """,
+                (task_id, lease_token),
+            ).fetchone()
+            if row is None:
+                raise RuntimeError("authoring lease is not owned")
+            version = int(row["mentor_review_version"]) + 1
+            cursor = connection.execute(
+                """
+                UPDATE authoring_jobs
+                SET state = 'awaiting_mentor_approval', mentor_review_version = ?,
+                    mentor_draft_hash = ?, draft_suite_json = ?,
+                    mentor_proposal_json = ?, critic_verdict_json = ?,
+                    mentor_approved_at = NULL, lease_token = NULL,
+                    lease_expires_at = NULL, updated_at = ?
+                WHERE task_id = ? AND state = 'authoring' AND lease_token = ?
+                """,
+                (
+                    version,
+                    draft_hash,
+                    suite_json,
+                    proposal_json,
+                    critic_verdict_json,
+                    now,
+                    task_id,
+                    lease_token,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise RuntimeError("authoring lease was lost before mentor review")
+        return MentorReview(
+            task_id=task_id,
+            project=row["project"],
+            starter_sha=row["starter_sha"],
+            version=version,
+            draft_hash=draft_hash,
+            proposal_json=proposal_json,
+        )
+
+    def next_pending_mentor_review(self) -> MentorReview | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT task_id, project, starter_sha, mentor_review_version,
+                       mentor_draft_hash, mentor_proposal_json
+                FROM authoring_jobs
+                WHERE state = 'awaiting_mentor_approval'
+                ORDER BY updated_at, task_id
+                LIMIT 1
+                """
+            ).fetchone()
+        return None if row is None else self._mentor_review(row)
+
+    def approve_mentor_review(self, task_id: str, version: int, draft_hash: str) -> bool:
+        if not _valid_review_identity(task_id, version, draft_hash):
+            return False
+        now = self.clock()
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE authoring_jobs
+                SET state = 'queued_for_acceptance', mentor_approved_at = ?, updated_at = ?
+                WHERE task_id = ? AND state = 'awaiting_mentor_approval'
+                  AND mentor_review_version = ? AND mentor_draft_hash = ?
+                """,
+                (now, now, task_id, version, draft_hash),
+            )
+            return cursor.rowcount == 1
+
+    def request_mentor_revision(
+        self,
+        task_id: str,
+        version: int,
+        draft_hash: str,
+        revision: str,
+    ) -> bool:
+        if not _valid_review_identity(task_id, version, draft_hash):
+            return False
+        revision = _bounded_text(revision, "mentor revision", 4_000)
+        now = self.clock()
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE authoring_jobs
+                SET state = 'queued', mentor_revision = ?, attempts = 0,
+                    critic_feedback_json = NULL, draft_suite_json = NULL,
+                    mentor_proposal_json = NULL, critic_verdict_json = NULL,
+                    mentor_draft_hash = NULL, mentor_approved_at = NULL,
+                    next_attempt_at = 0, updated_at = ?
+                WHERE task_id = ? AND state = 'awaiting_mentor_approval'
+                  AND mentor_review_version = ? AND mentor_draft_hash = ?
+                """,
+                (revision, now, task_id, version, draft_hash),
+            )
+            return cursor.rowcount == 1
+
+    def pause_mentor_review(self, task_id: str, version: int, draft_hash: str) -> bool:
+        if not _valid_review_identity(task_id, version, draft_hash):
+            return False
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE authoring_jobs SET state = 'mentor_paused', updated_at = ?
+                WHERE task_id = ? AND state = 'awaiting_mentor_approval'
+                  AND mentor_review_version = ? AND mentor_draft_hash = ?
+                """,
+                (self.clock(), task_id, version, draft_hash),
+            )
+            return cursor.rowcount == 1
+
+    def resume_mentor_review(self, task_id: str) -> bool:
+        if not _TASK_ID.fullmatch(task_id):
+            return False
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE authoring_jobs
+                SET state = 'awaiting_mentor_approval', updated_at = ?
+                WHERE task_id = ? AND state = 'mentor_paused'
+                  AND mentor_draft_hash IS NOT NULL
+                """,
+                (self.clock(), task_id),
+            )
+            return cursor.rowcount == 1
+
+    def claim_next_approved_authoring(self) -> AuthoringJob | None:
+        now = self.clock()
+        lease_token = secrets.token_urlsafe(24)
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                """
+                SELECT task_id FROM authoring_jobs
+                WHERE state = 'queued_for_acceptance'
+                   OR (state = 'accepting' AND lease_expires_at <= ?)
+                ORDER BY updated_at, task_id
+                LIMIT 1
+                """,
+                (now,),
+            ).fetchone()
+            if row is None:
+                return None
+            connection.execute(
+                """
+                UPDATE authoring_jobs
+                SET state = 'accepting', lease_token = ?, lease_expires_at = ?, updated_at = ?
+                WHERE task_id = ?
+                """,
+                (lease_token, now + self.lease_seconds, now, row["task_id"]),
+            )
+            claimed = connection.execute(
+                "SELECT * FROM authoring_jobs WHERE task_id = ?", (row["task_id"],)
+            ).fetchone()
+            assert claimed is not None
+            return self._job(claimed)
 
     def next_pending_clarification(self) -> Clarification | None:
         with self._connect() as connection:
@@ -1017,7 +1237,24 @@ class GraderStore:
             clarification_question=row["clarification_question"],
             clarification_answer=row["clarification_answer"],
             critic_feedback_json=row["critic_feedback_json"],
+            mentor_review_version=row["mentor_review_version"],
+            mentor_draft_hash=row["mentor_draft_hash"],
+            mentor_revision=row["mentor_revision"],
+            draft_suite_json=row["draft_suite_json"],
+            mentor_proposal_json=row["mentor_proposal_json"],
+            critic_verdict_json=row["critic_verdict_json"],
             last_error_code=row["last_error_code"],
+        )
+
+    @staticmethod
+    def _mentor_review(row: sqlite3.Row) -> MentorReview:
+        return MentorReview(
+            task_id=row["task_id"],
+            project=row["project"],
+            starter_sha=row["starter_sha"],
+            version=row["mentor_review_version"],
+            draft_hash=row["mentor_draft_hash"],
+            proposal_json=row["mentor_proposal_json"],
         )
 
 
@@ -1206,6 +1443,29 @@ def _validate_identity(
         raise ValueError("invalid branch_name")
     if not _SHA.fullmatch(starter_sha):
         raise ValueError("invalid starter_sha")
+
+
+def _valid_review_identity(task_id: str, version: int, draft_hash: str) -> bool:
+    return (
+        bool(_TASK_ID.fullmatch(task_id))
+        and not isinstance(version, bool)
+        and isinstance(version, int)
+        and version > 0
+        and isinstance(draft_hash, str)
+        and bool(_HASH.fullmatch(draft_hash))
+    )
+
+
+def _canonical_json_object(value: str, label: str, maximum: int) -> str:
+    if not isinstance(value, str) or not value or len(value.encode("utf-8")) > maximum:
+        raise ValueError(f"{label} must be bounded JSON")
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError as error:
+        raise ValueError(f"{label} must be valid JSON") from error
+    if not isinstance(parsed, dict):
+        raise ValueError(f"{label} must contain an object")
+    return _canonical_json_bytes(parsed).decode("utf-8")
 
 
 def _canonical_assignment(value: str) -> str:

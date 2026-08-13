@@ -39,7 +39,11 @@ def _suite() -> SuiteDraft:
                 "summary": "Проверяет вычисление следующего ID.",
                 "clarification": None,
                 "rubric": [
-                    {"id": "next-id", "description": "Следующий ID вычисляется корректно.", "weight": 1}
+                    {
+                        "id": "next-id",
+                        "description": "Следующий ID вычисляется корректно.",
+                        "weight": 1,
+                    }
                 ],
                 "cases": [
                     {
@@ -72,7 +76,10 @@ def _proposal_payload() -> dict:
         ],
         "test_plan": ["Основной сценарий.", "Пустой список.", "Произвольный порядок."],
         "reference_approach": "Найти максимальный id с безопасным значением по умолчанию.",
-        "reference_solution": "def next_id(rows):\n    return max((row['id'] for row in rows), default=0) + 1",
+        "reference_solution": (
+            "def next_id(rows):\n"
+            "    return max((row['id'] for row in rows), default=0) + 1"
+        ),
         "critic_summary": "Набор покрывает заявленное поведение.",
     }
 

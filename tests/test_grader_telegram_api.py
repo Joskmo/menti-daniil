@@ -60,7 +60,7 @@ def test_telegram_transport_returns_bounded_update_batch() -> None:
         "offset": 8,
         "timeout": 30,
         "limit": 100,
-        "allowed_updates": ["message"],
+        "allowed_updates": ["message", "callback_query"],
     }
 
 

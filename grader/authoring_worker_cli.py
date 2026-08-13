@@ -9,6 +9,7 @@ from grader.author import HermesTestAuthor
 from grader.coordinator import AuthoringCoordinator
 from grader.critic import HermesTestCritic
 from grader.llm_broker import UnixLlmBrokerClient
+from grader.mentor_proposal import HermesMentorProposalAuthor
 from grader.source import GitSourceLoader
 from grader.store import GraderStore, SuiteVault
 from grader.vm_executor import VmSuiteExecutor
@@ -55,6 +56,7 @@ def build_from_environment() -> AuthoringCoordinator:
         source_loader=source_loader,
         author=HermesTestAuthor(broker=broker),
         critic=HermesTestCritic(broker=broker),
+        proposal_author=HermesMentorProposalAuthor(broker=broker),
         acceptance_gate=StarterFailureGate(VmSuiteExecutor(vm_worker)),
     )
 

@@ -48,26 +48,38 @@ projects/
 ## Автоматическая скрытая проверка
 
 Для карточек Даниила bridge фиксирует точный стартовый commit и передаёт задачу
-закрытому grader. TestAuthor составляет декларативный набор проверок, независимый
-TestCritic проверяет его качество, после чего starter дважды исполняется в
-одноразовой QEMU/KVM VM. Набор замораживается только если он детерминированно
-находит дефект в starter.
+закрытому grader. TestAuthor составляет декларативный draft, а независимый
+TestCritic проверяет его качество. Затем приватный Telegram-бот показывает ментору
+bounded summary трактовки, критериев и тест-плана. Отдельные кнопки открывают
+полные спорные варианты и рекомендуемое правильное решение. Ментор утверждает exact
+draft, просит новую версию, ставит proposal на паузу или окончательно отменяет
+задачу. Приостановленный proposal возвращается командой `/resume PY-…`. Только
+утверждённая exact version проходит повторяемую проверку starter в одноразовой
+QEMU/KVM VM и замораживается в immutable vault. Старый authoring worker не может
+обойти approval: DB допускает freeze только из exact approved acceptance lease.
 
 Каждый следующий push в task-ветку попадает в durable очередь и проверяется в
-новой VM без сети. В GitHub публикуется обязательный check `hidden-grade` только
-с итогом pass/fail; подробный отчёт остаётся в приватном Telegram-боте ментора.
-Hidden suite и ожидаемые значения не записываются в GitHub.
+новой VM без сети. В GitHub публикуется обязательный status `hidden-grade` только
+с итогом pass/fail; подробный `N/M` остаётся в приватном Telegram-боте ментора.
+После оценки отдельный LLM-worker анализирует сохранённый snapshot того же exact
+commit и присылает сильные стороны, слабые места и рекомендации. Этот анализ не
+задерживает и не изменяет deterministic grade. Hidden suite и ожидаемые значения
+не записываются в GitHub и не передаются в feedback worker.
 
 ### Запуск grader profile
 
-1. Скопировать grader-переменные из `.env.example` в локальный `.env`.
+1. Скопировать grader-переменные из `.env.example` в локальный `.env`, включая
+   отдельный BotFather token и разрешённые mentor chat/user IDs.
 2. Создать каталоги state, vault, Git cache, launcher socket, broker socket и bot
    data; владельцем должен быть UID `1000`, mode — `0700`.
-3. Положить GitHub App private key в `.secrets/github_app_private_key` с mode
-   `0600`. В App нужны `Contents: read`, `Pull requests: read`, `Checks: write`.
-4. Запустить credential broker через Hermes Python вне Compose, направив socket в
+3. Настроить один credential provider для GitHub status publisher. Для
+   двухпользовательского MVP достаточно локального `GITHUB_TOKEN`; GitHub App
+   остаётся optional заменой.
+4. Запустить LLM broker через Hermes Python вне Compose, направив socket в
    `GRADER_BROKER_RUN_DIR`.
-5. Запустить сервисы:
+5. Убедиться, что legacy `menti-hermes-report.service` остановлен: grade reports
+   должен потреблять только `menti-grader-bot`.
+6. Запустить сервисы:
 
 ```bash
 docker compose --profile grader up -d --build
@@ -78,7 +90,8 @@ docker compose --profile grader up -d --build
 ```bash
 docker compose --profile grader ps
 docker compose --profile grader logs --tail=100 \
-  menti-authoring-worker menti-grading-worker menti-check-publisher menti-grader-bot
+  menti-authoring-worker menti-grading-worker menti-code-feedback-worker \
+  menti-check-publisher menti-grader-bot
 ```
 
 `hidden-grade` следует добавлять в branch protection только после успешного

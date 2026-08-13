@@ -5,6 +5,7 @@ from typing import Protocol
 from grader.author import AssignmentContext, SourceFile
 from grader.contracts import SuiteDraft
 from grader.critic import CriticVerdict
+from grader.mentor_proposal import MentorProposal
 from grader.store import AuthoringJob, GraderStore, SuiteVault
 
 
@@ -57,6 +58,17 @@ class TestCritic(Protocol):
     ) -> CriticVerdict: ...
 
 
+class MentorProposalAuthor(Protocol):
+    def create(
+        self,
+        context: AssignmentContext,
+        suite: SuiteDraft,
+        *,
+        critic_summary: str,
+        mentor_revision: str | None = None,
+    ) -> MentorProposal: ...
+
+
 class SuiteAcceptanceGate(Protocol):
     def validate(
         self,
@@ -74,6 +86,7 @@ class AuthoringCoordinator:
         source_loader: SourceLoader,
         author: TestAuthor,
         critic: TestCritic,
+        proposal_author: MentorProposalAuthor,
         acceptance_gate: SuiteAcceptanceGate,
         max_author_attempts: int = 3,
         author_model: str = "gpt-5.6-sol",
@@ -85,11 +98,15 @@ class AuthoringCoordinator:
         self.source_loader = source_loader
         self.author = author
         self.critic = critic
+        self.proposal_author = proposal_author
         self.acceptance_gate = acceptance_gate
         self.max_author_attempts = max_author_attempts
         self.author_model = author_model
 
     def process_once(self) -> str | None:
+        approved_job = self.store.claim_next_approved_authoring()
+        if approved_job is not None:
+            return self._accept_approved(approved_job)
         job = self.store.claim_next_authoring()
         if job is None:
             return None
@@ -126,6 +143,47 @@ class AuthoringCoordinator:
             if verdict.status == "rejected":
                 return self._reject_or_retry(job, verdict.to_payload(), "critic-rejected")
 
+            proposal = self.proposal_author.create(
+                context,
+                suite,
+                critic_summary=verdict.summary,
+                mentor_revision=job.mentor_revision,
+            )
+            self.store.submit_mentor_review(
+                job.task_id,
+                job.lease_token,
+                suite_json=json.dumps(
+                    suite.to_payload(), ensure_ascii=False, sort_keys=True, allow_nan=False
+                ),
+                proposal_json=json.dumps(
+                    proposal.to_payload(), ensure_ascii=False, sort_keys=True, allow_nan=False
+                ),
+                critic_verdict_json=json.dumps(
+                    verdict.to_payload(), ensure_ascii=False, sort_keys=True, allow_nan=False
+                ),
+            )
+            return "awaiting_mentor_approval"
+        except Exception:
+            if job.attempts >= self.max_author_attempts:
+                self.store.mark_authoring_failed(
+                    job.task_id,
+                    job.lease_token,
+                    "authoring-error",
+                )
+            else:
+                self.store.release_authoring(job.task_id, job.lease_token)
+            raise
+
+    def _accept_approved(self, job: AuthoringJob) -> str:
+        if job.lease_token is None:
+            raise RuntimeError("claimed acceptance job has no fencing token")
+        try:
+            if job.draft_suite_json is None or job.mentor_draft_hash is None:
+                raise RuntimeError("approved mentor draft is missing")
+            suite = SuiteDraft.from_cli_output(job.draft_suite_json)
+            if suite.status != "ready":
+                raise RuntimeError("approved mentor draft is not ready")
+            context = self._context(job)
             acceptance = self.acceptance_gate.validate(context, suite)
             if not acceptance.passed:
                 feedback_payload = {
@@ -147,7 +205,6 @@ class AuthoringCoordinator:
                     feedback_payload,
                     "acceptance-rejected",
                 )
-
             self.store.finalize_authoring(
                 job.task_id,
                 job.lease_token,
@@ -160,14 +217,7 @@ class AuthoringCoordinator:
             )
             return "ready"
         except Exception:
-            if job.attempts >= self.max_author_attempts:
-                self.store.mark_authoring_failed(
-                    job.task_id,
-                    job.lease_token,
-                    "authoring-error",
-                )
-            else:
-                self.store.release_authoring(job.task_id, job.lease_token)
+            self.store.release_authoring(job.task_id, job.lease_token)
             raise
 
     def _reject_or_retry(
@@ -208,6 +258,12 @@ class AuthoringCoordinator:
                 f"{description}\n\n"
                 "Ответ ментора на продуктовое уточнение:\n"
                 f"{job.clarification_answer}"
+            )
+        if job.mentor_revision is not None:
+            description = (
+                f"{description}\n\n"
+                "Приватные решения ментора для скрытой проверки:\n"
+                f"{job.mentor_revision}"
             )
         source_files = self.source_loader.load(
             job.project,

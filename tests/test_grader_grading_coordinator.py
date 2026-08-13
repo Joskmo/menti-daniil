@@ -1,11 +1,12 @@
 import json
+import sqlite3
 from pathlib import Path
 
 import pytest
 
 from grader.contracts import SuiteDraft
 from grader.executor import CaseResult, SuiteInfrastructureError, SuiteResult
-from grader.grading_coordinator import GradingCoordinator
+from grader.grading_coordinator import GradingCoordinator, _feedback_source_snapshot
 from grader.store import GraderStore, SuiteVault
 
 
@@ -216,3 +217,51 @@ def test_grading_infrastructure_failure_is_retryable_without_result_outboxes(tmp
     assert released.private_report_json is None
     assert store.claim_next_check_publication() is None
     assert store.claim_next_mentor_notification() is None
+
+
+def test_feedback_context_database_failure_does_not_block_deterministic_grade(
+    tmp_path, monkeypatch
+) -> None:
+    store = GraderStore(tmp_path / "grader.db", clock=lambda: 100.0)
+    vault = SuiteVault(tmp_path / "vault")
+    stored = vault.freeze(
+        task_id="PY-002",
+        starter_sha="a" * 40,
+        suite_payload=_suite().to_payload(),
+        author_model="gpt-5.6-sol",
+    )
+    attempt = store.enqueue_grading(
+        task_id="PY-002",
+        project="json",
+        branch_name="task/PY-002-next-id",
+        commit_sha="b" * 40,
+        suite_hash=stored.suite_hash,
+    )
+
+    def fail_feedback_lookup(task_id: str):
+        raise sqlite3.OperationalError("feedback-only lookup failed")
+
+    monkeypatch.setattr(store, "get_authoring", fail_feedback_lookup)
+    coordinator = GradingCoordinator(
+        store=store,
+        vault=vault,
+        exporter=FakeExporter(),
+        executor=FakeExecutor(),
+    )
+
+    assert coordinator.process_once() == "completed"
+    assert store.get_grading(attempt.attempt_id).state == "completed"
+    assert store.claim_next_check_publication() is not None
+    assert store.claim_next_mentor_notification() is not None
+    assert store.claim_next_code_feedback() is None
+
+
+def test_feedback_snapshot_preserves_utf8_source_bytes_and_newlines(tmp_path) -> None:
+    source = tmp_path / "main.py"
+    expected = b"a\r\nb\r"
+    source.write_bytes(expected)
+
+    snapshot = _feedback_source_snapshot(tmp_path)
+
+    assert snapshot == [{"path": "main.py", "content": "a\r\nb\r"}]
+    assert snapshot[0]["content"].encode("utf-8") == expected

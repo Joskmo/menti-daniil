@@ -145,6 +145,36 @@ services:
     mem_limit: 256m
     cpus: 1.0
 
+  menti-code-feedback-worker:
+    profiles:
+      - grader
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: menti-code-feedback-worker
+    restart: unless-stopped
+    command:
+      - python
+      - -m
+      - grader.code_feedback_worker_cli
+    healthcheck:
+      disable: true
+    env_file:
+      - .env
+    volumes:
+      - ${GRADER_DATABASE_DIR:-./runtime-data/grader-state}:/grader-state
+      - ${GRADER_BROKER_RUN_DIR:-./runtime-data/broker}:/run/menti-broker:ro
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=0700,uid=1000,gid=1000
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    pids_limit: 64
+    mem_limit: 128m
+    cpus: 0.5
+
   menti-check-publisher:
     profiles:
       - grader

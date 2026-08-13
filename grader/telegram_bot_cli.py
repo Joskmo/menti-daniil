@@ -12,6 +12,10 @@ from grader.telegram_api import TelegramApiError, TelegramHttpTransport
 class PollingBot(Protocol):
     def sync_mentor_notification(self) -> str: ...
 
+    def sync_feedback_notification(self) -> str: ...
+
+    def sync_pending_mentor_review(self) -> str: ...
+
     def sync_pending_clarification(self) -> str: ...
 
     def handle_update(self, update: dict[str, Any]) -> str: ...
@@ -23,6 +27,8 @@ class PollingApi(Protocol):
 
 def run_cycle(bot: PollingBot, api: PollingApi, *, offset: int | None) -> int | None:
     bot.sync_mentor_notification()
+    bot.sync_feedback_notification()
+    bot.sync_pending_mentor_review()
     bot.sync_pending_clarification()
     updates = sorted(api.get_updates(offset=offset), key=lambda item: item["update_id"])
     next_offset = offset

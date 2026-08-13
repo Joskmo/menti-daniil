@@ -192,7 +192,9 @@ def test_coordinator_waits_for_mentor_then_freezes_only_approved_exact_draft(tmp
     assert gate.calls == 0
     assert not (tmp_path / "vault" / "PY-002").exists()
 
-    assert store.approve_mentor_review(review.task_id, review.version, review.draft_hash)
+    assert store.approve_mentor_review(
+        review.task_id, review.version, review.draft_hash, "test:mentor"
+    )
     assert coordinator.process_once() == "ready"
 
     job = store.get_authoring("PY-002")

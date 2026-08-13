@@ -71,10 +71,22 @@ def test_authoring_lease_is_fenced_across_reclaim(tmp_path) -> None:
     now[0] = 111.0
     second = store.claim_next_authoring()
 
-    assert second is not None
+    assert second is not None and second.lease_token is not None
     assert second.lease_token != first.lease_token
     assert not store.release_authoring(first.task_id, first.lease_token)
-    store.mark_authoring_ready(second.task_id, second.lease_token, "f" * 64)
+    review = store.submit_mentor_review(
+        second.task_id,
+        second.lease_token,
+        suite_json='{"suite":"approved"}',
+        proposal_json='{"proposal":"approved"}',
+        critic_verdict_json='{"status":"approved"}',
+    )
+    assert store.approve_mentor_review(
+        review.task_id, review.version, review.draft_hash, "test:mentor"
+    )
+    accepting = store.claim_next_approved_authoring()
+    assert accepting is not None and accepting.lease_token is not None
+    store.mark_authoring_ready(accepting.task_id, accepting.lease_token, review.draft_hash)
     assert store.get_authoring("PY-002").state == "ready"
 
 
@@ -89,25 +101,68 @@ def test_authoring_finalize_checks_fence_before_promoting_vault_output(tmp_path)
         starter_sha="a" * 40,
         assignment_json=_assignment(),
     )
-    stale = store.claim_next_authoring()
+    authoring = store.claim_next_authoring()
+    assert authoring is not None and authoring.lease_token is not None
+    suite_json = '{"suite":"approved"}'
+    review = store.submit_mentor_review(
+        authoring.task_id,
+        authoring.lease_token,
+        suite_json=suite_json,
+        proposal_json='{"proposal":"approved"}',
+        critic_verdict_json='{"status":"approved"}',
+    )
+    assert store.approve_mentor_review(
+        review.task_id, review.version, review.draft_hash, "test:mentor"
+    )
+    stale = store.claim_next_approved_authoring()
     assert stale is not None and stale.lease_token is not None
     now[0] = 111.0
-    current = store.claim_next_authoring()
+    current = store.claim_next_approved_authoring()
     assert current is not None and current.lease_token is not None
     promoted: list[str] = []
 
     def promote() -> StoredSuite:
         promoted.append("called")
-        return StoredSuite("PY-002", "a" * 40, "f" * 64, "model", {})
+        return StoredSuite(
+            "PY-002", "a" * 40, review.draft_hash, "model", {"suite": "approved"}
+        )
 
     with pytest.raises(RuntimeError, match="lease is not owned"):
         store.finalize_authoring("PY-002", stale.lease_token, promote)
     assert promoted == []
 
     stored = store.finalize_authoring("PY-002", current.lease_token, promote)
-    assert stored.suite_hash == "f" * 64
+    assert stored.suite_hash == review.draft_hash
     assert promoted == ["called"]
-    assert store.get_authoring("PY-002").suite_hash == "f" * 64
+    assert store.get_authoring("PY-002").suite_hash == review.draft_hash
+
+
+def test_legacy_authoring_lease_cannot_finalize_without_exact_mentor_approval(
+    tmp_path,
+) -> None:
+    store = GraderStore(tmp_path / "grader.db", clock=lambda: 100.0)
+    store.enqueue_authoring(
+        task_id="PY-002",
+        row_id="row-2",
+        project="json",
+        branch_name="task/PY-002-next-id",
+        starter_sha="a" * 40,
+        assignment_json=_assignment(),
+    )
+    legacy = store.claim_next_authoring()
+    assert legacy is not None and legacy.lease_token is not None
+    promoted: list[str] = []
+
+    def promote() -> StoredSuite:
+        promoted.append("called")
+        return StoredSuite("PY-002", "a" * 40, "f" * 64, "model", {})
+
+    with pytest.raises(RuntimeError, match="mentor approval"):
+        store.mark_authoring_ready(legacy.task_id, legacy.lease_token, "f" * 64)
+    with pytest.raises(RuntimeError, match="mentor approval"):
+        store.finalize_authoring(legacy.task_id, legacy.lease_token, promote)
+    assert promoted == []
+    assert store.get_authoring("PY-002").state == "authoring"
 
 
 def test_clarification_answer_requeues_exact_revision_once(tmp_path) -> None:

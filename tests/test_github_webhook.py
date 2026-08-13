@@ -269,7 +269,23 @@ def test_push_without_authoring_identity_remains_pending_until_suite_exists(tmp_
     )
     claimed = grader_store.claim_next_authoring()
     assert claimed is not None and claimed.lease_token is not None
-    grader_store.mark_authoring_ready("PY-001", claimed.lease_token, "c" * 64)
+    review = grader_store.submit_mentor_review(
+        claimed.task_id,
+        claimed.lease_token,
+        suite_json='{"suite":"approved"}',
+        proposal_json='{"proposal":"approved"}',
+        critic_verdict_json='{"status":"approved"}',
+    )
+    assert grader_store.approve_mentor_review(
+        review.task_id, review.version, review.draft_hash, "test:mentor"
+    )
+    accepting = grader_store.claim_next_approved_authoring()
+    assert accepting is not None and accepting.lease_token is not None
+    grader_store.mark_authoring_ready(
+        accepting.task_id,
+        accepting.lease_token,
+        review.draft_hash,
+    )
 
     assert handler.retry_pending_once()
     attempt = grader_store.claim_next_grading()

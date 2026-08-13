@@ -14,7 +14,13 @@ from typing import Any
 _MAX_REQUEST_BYTES = 600_000
 _MAX_RESPONSE_BYTES = 1_000_000
 _ALLOWED_PURPOSES = frozenset(
-    {"test-author", "test-contract-repair", "test-critic", "mentor-proposal"}
+    {
+        "test-author",
+        "test-contract-repair",
+        "test-critic",
+        "mentor-proposal",
+        "code-feedback",
+    }
 )
 
 

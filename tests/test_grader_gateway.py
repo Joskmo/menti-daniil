@@ -68,10 +68,26 @@ def test_gateway_enqueues_exact_commit_only_after_suite_is_ready(tmp_path) -> No
 
     claimed = store.claim_next_authoring()
     assert claimed is not None and claimed.lease_token is not None
-    store.mark_authoring_ready("PY-002", claimed.lease_token, "c" * 64)
+    review = store.submit_mentor_review(
+        claimed.task_id,
+        claimed.lease_token,
+        suite_json='{"suite":"approved"}',
+        proposal_json='{"proposal":"approved"}',
+        critic_verdict_json='{"status":"approved"}',
+    )
+    assert store.approve_mentor_review(
+        review.task_id, review.version, review.draft_hash, "test:mentor"
+    )
+    accepting = store.claim_next_approved_authoring()
+    assert accepting is not None and accepting.lease_token is not None
+    store.mark_authoring_ready(
+        accepting.task_id,
+        accepting.lease_token,
+        review.draft_hash,
+    )
 
     attempt = gateway.enqueue_commit("PY-002", "json", branch, "b" * 40)
     assert attempt is not None
     assert attempt.commit_sha == "b" * 40
-    assert attempt.suite_hash == "c" * 64
+    assert attempt.suite_hash == review.draft_hash
     assert gateway.enqueue_commit("PY-002", "json", branch, "b" * 40) == attempt

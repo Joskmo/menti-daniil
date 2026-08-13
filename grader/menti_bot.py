@@ -7,12 +7,14 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from grader.mentor_proposal import MentorProposal
-from grader.store import GraderStore, MentorNotification, MentorReview
+from grader.store import FeedbackNotification, GraderStore, MentorNotification, MentorReview
 
 _TASK_ID = re.compile(r"PY-[0-9]{3,}")
 _NONCE = re.compile(r"[A-Za-z0-9_-]{16,64}")
 _HASH = re.compile(r"[0-9a-f]{64}")
-_CALLBACK = re.compile(r"review:(approve|revise|pause):([A-Za-z0-9_-]{16,32})")
+_CALLBACK = re.compile(
+    r"review:(approve|revise|options|solution|pause|cancel):([A-Za-z0-9_-]{16,32})"
+)
 
 
 class TelegramTransport(Protocol):
@@ -217,6 +219,14 @@ class MentiStateStore:
                 """,
                 (review.task_id,),
             )
+            connection.execute(
+                """
+                DELETE FROM review_actions
+                WHERE task_id = ? AND version = ? AND draft_hash = ?
+                  AND state IN ('closed', 'expired')
+                """,
+                (review.task_id, review.version, review.draft_hash),
+            )
             token = secrets.token_urlsafe(12)
             connection.execute(
                 """
@@ -309,6 +319,28 @@ class MentiBot:
             notification.lease_token,
         ):
             raise RuntimeError("mentor notification lease was lost after delivery")
+        return "sent"
+
+    def sync_feedback_notification(self) -> str:
+        notification = self.grader_store.claim_next_feedback_notification()
+        if notification is None:
+            return "idle"
+        try:
+            self.transport.send_message(
+                self.allowed_chat_id,
+                _format_feedback_notification(notification),
+            )
+        except Exception:
+            self.grader_store.release_feedback_notification(
+                notification.notification_id,
+                notification.lease_token,
+            )
+            raise
+        if not self.grader_store.mark_feedback_notification_sent(
+            notification.notification_id,
+            notification.lease_token,
+        ):
+            raise RuntimeError("feedback notification lease was lost after delivery")
         return "sent"
 
     def sync_pending_clarification(self) -> str:
@@ -431,6 +463,18 @@ class MentiBot:
             self.state_store.pause(chat_id, self.allowed_user_id)
             self.transport.send_message(chat_id, "Диалог поставлен на паузу. /start — продолжить.")
             return "paused"
+        if isinstance(text, str) and text.startswith("/resume "):
+            task_id = text.removeprefix("/resume ").strip().upper()
+            if not _TASK_ID.fullmatch(task_id):
+                self.transport.send_message(chat_id, "Формат: /resume PY-003")
+                return "invalid-resume"
+            if not self.grader_store.resume_mentor_review(task_id):
+                self.transport.send_message(
+                    chat_id, "Нет приостановленного proposal для этой задачи."
+                )
+                return "expired"
+            self.transport.send_message(chat_id, f"{task_id}: proposal снова активен.")
+            return "resumed-review"
         if text == "/start":
             if conversation is None:
                 self.transport.send_message(chat_id, "Сейчас нет вопроса, ожидающего ответа.")
@@ -515,7 +559,10 @@ class MentiBot:
             return "expired"
         if action_name == "approve":
             accepted = self.grader_store.approve_mentor_review(
-                action.task_id, action.version, action.draft_hash
+                action.task_id,
+                action.version,
+                action.draft_hash,
+                f"telegram:user:{self.allowed_user_id}:chat:{self.allowed_chat_id}",
             )
             self.state_store.close_review(token)
             if not accepted:
@@ -527,6 +574,46 @@ class MentiBot:
                 f"{action.task_id}: версия {action.version} утверждена. Запускаю KVM acceptance.",
             )
             return "approved"
+        if action_name in {"options", "solution"}:
+            try:
+                job = self.grader_store.get_authoring(action.task_id)
+            except KeyError:
+                job = None
+            if (
+                job is None
+                or job.state != "awaiting_mentor_approval"
+                or job.mentor_review_version != action.version
+                or job.mentor_draft_hash != action.draft_hash
+                or job.mentor_proposal_json is None
+            ):
+                self.state_store.close_review(token)
+                self.transport.answer_callback_query(callback_id, "Proposal уже изменился.")
+                return "expired"
+            proposal = MentorProposal.from_output(job.mentor_proposal_json)
+            detail = (
+                _format_mentor_options(action.task_id, proposal)
+                if action_name == "options"
+                else _format_mentor_solution(action.task_id, proposal)
+            )
+            for chunk in _telegram_chunks(detail):
+                self.transport.send_message(self.allowed_chat_id, chunk)
+            self.transport.answer_callback_query(callback_id, "Показано")
+            return "showed-options" if action_name == "options" else "showed-solution"
+        if action_name == "cancel":
+            accepted = self.grader_store.cancel_mentor_review(
+                action.task_id, action.version, action.draft_hash
+            )
+            self.state_store.close_review(token)
+            self.transport.answer_callback_query(
+                callback_id, "Задача отменена" if accepted else "Proposal уже изменился."
+            )
+            if not accepted:
+                return "expired"
+            self.transport.send_message(
+                self.allowed_chat_id,
+                f"{action.task_id}: подготовка hidden suite отменена.",
+            )
+            return "cancelled-task"
         if action_name == "pause":
             accepted = self.grader_store.pause_mentor_review(
                 action.task_id, action.version, action.draft_hash
@@ -610,56 +697,126 @@ def _review_markup(token: str) -> dict[str, Any]:
             [
                 {"text": "Утвердить", "callback_data": f"review:approve:{token}"},
                 {"text": "Изменить", "callback_data": f"review:revise:{token}"},
+            ],
+            [
+                {"text": "Варианты", "callback_data": f"review:options:{token}"},
+                {"text": "Решение", "callback_data": f"review:solution:{token}"},
+            ],
+            [
                 {"text": "Пауза", "callback_data": f"review:pause:{token}"},
-            ]
+                {"text": "Отменить задачу", "callback_data": f"review:cancel:{token}"},
+            ],
         ]
     }
 
 
+def _bounded_section(title: str, body: str, maximum: int) -> str:
+    text = f"{title}:\n{body.strip()}"
+    return text if len(text) <= maximum else text[: maximum - 1].rstrip() + "…"
+
+
 def _format_mentor_review(review: MentorReview, proposal: MentorProposal) -> str:
-    lines = [
+    criteria = "\n".join(f"• {item}" for item in proposal.criteria)
+    test_plan = "\n".join(f"• {item}" for item in proposal.test_plan)
+    sections = [
         f"{review.task_id} — согласование скрытой проверки",
         f"Проект: {review.project}",
         f"Starter: {review.starter_sha[:12]}",
         f"Версия proposal: {review.version}",
         "",
-        "Трактовка:",
-        proposal.interpretation,
+        _bounded_section("Трактовка", proposal.interpretation, 850),
         "",
-        "Критерии:",
-        *[f"• {item}" for item in proposal.criteria],
+        _bounded_section("Критерии", criteria, 1_250),
+        "",
+        _bounded_section("План скрытой проверки", test_plan, 1_200),
+        "",
+        _bounded_section("Рекомендуемый подход", proposal.reference_approach, 450),
+        "",
+        _bounded_section("TestCritic", proposal.critic_summary, 300),
+        "",
+        "Полные спорные варианты и reference solution доступны отдельными кнопками.",
     ]
-    if proposal.decisions:
-        lines.extend(["", "Спорные решения:"])
-        for number, decision in enumerate(proposal.decisions, start=1):
-            lines.append(f"{number}. {decision.question}")
-            for index, option in enumerate(decision.options):
-                marker = "рекомендую" if index == decision.recommended_option else "вариант"
-                lines.append(f"   • {option} — {marker}")
-            lines.append(f"   Почему: {decision.reason}")
-    lines.extend(
+    text = "\n".join(sections)
+    return text if len(text) <= 3_950 else text[:3_949].rstrip() + "…"
+
+
+def _format_mentor_options(task_id: str, proposal: MentorProposal) -> str:
+    lines = [f"{task_id} — варианты трактовки"]
+    if not proposal.decisions:
+        lines.append("Материальных развилок не обнаружено.")
+    for number, decision in enumerate(proposal.decisions, start=1):
+        lines.extend(["", f"{number}. {decision.question}"])
+        for index, option in enumerate(decision.options):
+            marker = "рекомендую" if index == decision.recommended_option else "вариант"
+            lines.append(f"• {option} — {marker}")
+        lines.append(f"Почему: {decision.reason}")
+    return "\n".join(lines)
+
+
+def _format_mentor_solution(task_id: str, proposal: MentorProposal) -> str:
+    return "\n\n".join(
         [
-            "",
-            "План скрытой проверки:",
-            *[f"• {item}" for item in proposal.test_plan],
-            "",
-            "Рекомендуемый подход:",
-            proposal.reference_approach,
-            "",
-            "Предлагаемое правильное решение:",
-            proposal.reference_solution,
-            "",
-            f"TestCritic: {proposal.critic_summary}",
+            f"{task_id} — предлагаемое правильное решение",
+            _bounded_section("Подход", proposal.reference_approach, 2_100),
+            _bounded_section("Код", proposal.reference_solution, 8_050),
         ]
     )
+
+
+def _telegram_chunks(text: str, maximum: int = 3_950) -> tuple[str, ...]:
+    chunks: list[str] = []
+    remaining = text.strip()
+    while remaining:
+        if len(remaining) <= maximum:
+            chunks.append(remaining)
+            break
+        boundary = remaining.rfind("\n", 0, maximum + 1)
+        if boundary < maximum // 2:
+            boundary = maximum
+        chunks.append(remaining[:boundary].rstrip())
+        remaining = remaining[boundary:].lstrip("\n")
+    return tuple(chunks)
+
+
+def _format_feedback_notification(notification: FeedbackNotification) -> str:
+    try:
+        payload = json.loads(notification.feedback_json)
+    except json.JSONDecodeError as error:
+        raise RuntimeError("feedback notification is invalid") from error
+    expected = {
+        "schema_version",
+        "summary",
+        "strengths",
+        "weaknesses",
+        "recommendations",
+    }
+    if not isinstance(payload, dict) or set(payload) != expected or payload["schema_version"] != 1:
+        raise RuntimeError("feedback notification fields are invalid")
+    for key in ("strengths", "weaknesses", "recommendations"):
+        if not isinstance(payload[key], list) or any(
+            not isinstance(item, str) for item in payload[key]
+        ):
+            raise RuntimeError("feedback notification list is invalid")
+    summary = payload["summary"]
+    if not isinstance(summary, str):
+        raise RuntimeError("feedback notification summary is invalid")
+    lines = [
+        f"{notification.task_id} — разбор кода",
+        f"Commit: {notification.commit_sha[:12]}",
+        "",
+        summary,
+        "",
+        "Сильные стороны:",
+        *[f"• {item}" for item in payload["strengths"]],
+        "",
+        "Слабые места:",
+        *[f"• {item}" for item in payload["weaknesses"]],
+        "",
+        "Рекомендации:",
+        *[f"• {item}" for item in payload["recommendations"]],
+    ]
     text = "\n".join(lines)
-    if len(text) <= 3_950:
-        return text
-    prefix = "\n".join(lines[:-4])
-    suffix = f"\n\nTestCritic: {proposal.critic_summary}"
-    budget = max(200, 3_950 - len(prefix) - len(suffix) - 80)
-    solution = proposal.reference_solution[:budget].rstrip()
-    return f"{prefix}\n\nПредлагаемое правильное решение (сокращено):\n{solution}…{suffix}"
+    return text if len(text) <= 3_950 else text[:3_947].rstrip() + "…"
 
 
 def _format_mentor_notification(notification: MentorNotification) -> str:

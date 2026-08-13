@@ -6,10 +6,15 @@ class FakeBot:
         self.updates = []
         self.syncs = 0
         self.review_syncs = 0
+        self.feedback_syncs = 0
         self.report_syncs = 0
 
     def sync_mentor_notification(self):
         self.report_syncs += 1
+        return "idle"
+
+    def sync_feedback_notification(self):
+        self.feedback_syncs += 1
         return "idle"
 
     def sync_pending_mentor_review(self):
@@ -42,6 +47,7 @@ def test_telegram_cycle_syncs_pending_and_advances_after_highest_update() -> Non
     assert run_cycle(bot, api, offset=8) == 13
 
     assert bot.report_syncs == 1
+    assert bot.feedback_syncs == 1
     assert bot.review_syncs == 1
     assert bot.syncs == 1
     assert bot.updates == [10, 12]

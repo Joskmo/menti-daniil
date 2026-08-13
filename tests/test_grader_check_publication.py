@@ -28,13 +28,29 @@ def _completed_attempt(store: GraderStore):
     )
     job = store.claim_next_authoring()
     assert job is not None and job.lease_token is not None
-    store.mark_authoring_ready(job.task_id, job.lease_token, "c" * 64)
+    review = store.submit_mentor_review(
+        job.task_id,
+        job.lease_token,
+        suite_json='{"suite":"approved"}',
+        proposal_json='{"proposal":"approved"}',
+        critic_verdict_json='{"status":"approved"}',
+    )
+    assert store.approve_mentor_review(
+        review.task_id, review.version, review.draft_hash, "test:mentor"
+    )
+    accepting = store.claim_next_approved_authoring()
+    assert accepting is not None and accepting.lease_token is not None
+    store.mark_authoring_ready(
+        accepting.task_id,
+        accepting.lease_token,
+        review.draft_hash,
+    )
     attempt = store.enqueue_grading(
         task_id="PY-002",
         project="json",
         branch_name="task/PY-002-next-id",
         commit_sha="b" * 40,
-        suite_hash="c" * 64,
+        suite_hash=review.draft_hash,
     )
     claimed = store.claim_next_grading()
     assert claimed is not None and claimed.lease_token is not None

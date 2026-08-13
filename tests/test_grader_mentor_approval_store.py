@@ -105,6 +105,7 @@ def test_draft_waits_for_exact_versioned_mentor_approval_and_stale_actions_fail(
         review.task_id,
         review.version,
         review.draft_hash,
+        "test:mentor",
     )
 
     claimed_again = store.claim_next_authoring()
@@ -124,12 +125,18 @@ def test_draft_waits_for_exact_versioned_mentor_approval_and_stale_actions_fail(
         ),
     )
     assert review_v2.version == 2
+    assert not store.approve_mentor_review(
+        review_v2.task_id, review_v2.version, review_v2.draft_hash, ""
+    )
     assert store.approve_mentor_review(
         review_v2.task_id,
         review_v2.version,
         review_v2.draft_hash,
+        "telegram:user:7:chat:42",
     )
-    assert store.get_authoring("PY-002").state == "queued_for_acceptance"
+    approved = store.get_authoring("PY-002")
+    assert approved.state == "queued_for_acceptance"
+    assert approved.mentor_approved_by == "telegram:user:7:chat:42"
     assert store.claim_next_approved_authoring().mentor_review_version == 2
 
 
@@ -148,6 +155,43 @@ def test_mentor_can_pause_exact_current_proposal_without_losing_it(tmp_path) -> 
     assert store.pause_mentor_review(review.task_id, review.version, review.draft_hash)
     assert store.get_authoring(review.task_id).state == "mentor_paused"
     assert store.next_pending_mentor_review() is None
-    assert not store.approve_mentor_review(review.task_id, review.version, review.draft_hash)
+    assert not store.approve_mentor_review(
+        review.task_id, review.version, review.draft_hash, "test:mentor"
+    )
     assert store.resume_mentor_review(review.task_id)
-    assert store.next_pending_mentor_review() == review
+    resumed = store.next_pending_mentor_review()
+    assert resumed is not None
+    assert resumed.version == review.version + 1
+    assert resumed.draft_hash == review.draft_hash
+    assert resumed.proposal_json == review.proposal_json
+
+
+def test_mentor_can_cancel_only_exact_current_proposal(tmp_path) -> None:
+    store = GraderStore(tmp_path / "grader.db", clock=lambda: 100.0)
+    _enqueue(store)
+    claimed = store.claim_next_authoring()
+    review = store.submit_mentor_review(
+        claimed.task_id,
+        claimed.lease_token,
+        suite_json=_draft(),
+        proposal_json=_proposal(),
+        critic_verdict_json=(
+            '{"schema_version":1,"status":"approved","summary":"OK",'
+            '"clarification":null,"issues":[]}'
+        ),
+    )
+
+    assert not store.cancel_mentor_review(
+        review.task_id, review.version + 1, review.draft_hash
+    )
+    assert not store.cancel_mentor_review(
+        review.task_id, review.version, "f" * 64
+    )
+    assert store.cancel_mentor_review(
+        review.task_id, review.version, review.draft_hash
+    )
+    assert store.get_authoring(review.task_id).state == "cancelled"
+    assert store.next_pending_mentor_review() is None
+    assert not store.approve_mentor_review(
+        review.task_id, review.version, review.draft_hash, "test:mentor"
+    )

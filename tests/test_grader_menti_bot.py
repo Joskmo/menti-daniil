@@ -1,4 +1,12 @@
-from grader.menti_bot import MentiBot, MentiStateStore
+from grader.menti_bot import (
+    MentiBot,
+    MentiStateStore,
+    _format_mentor_options,
+    _format_mentor_review,
+    _format_mentor_solution,
+    _telegram_chunks,
+)
+from grader.mentor_proposal import MentorProposal
 from grader.store import GraderStore
 
 
@@ -204,7 +212,10 @@ def _mentor_review(store: GraderStore):
         suite_json='{"schema_version":1}',
         proposal_json=(
             '{"schema_version":1,"interpretation":"Вернуть следующий ID.",'
-            '"criteria":["Корректный ID."],"decisions":[],'
+            '"criteria":["Корректный ID."],"decisions":[{'
+            '"question":"Что вернуть для пустого списка?",'
+            '"options":["Вернуть 0.","Вернуть 1."],'
+            '"recommended_option":1,"reason":"Так сказано в условии."}],'
             '"test_plan":["Основной сценарий."],'
             '"reference_approach":"Найти максимум.",'
             '"reference_solution":"def next_id(rows): return 1",'
@@ -214,7 +225,7 @@ def _mentor_review(store: GraderStore):
     )
 
 
-def test_bot_sends_mentor_proposal_with_versioned_approve_revision_pause_buttons(tmp_path) -> None:
+def test_bot_sends_mentor_proposal_with_all_exact_versioned_actions(tmp_path) -> None:
     grader = GraderStore(tmp_path / "grader.db", clock=lambda: 100.0)
     review = _mentor_review(grader)
     telegram = FakeTelegram()
@@ -231,9 +242,32 @@ def test_bot_sends_mentor_proposal_with_versioned_approve_revision_pause_buttons
     _, text, message_id, markup = telegram.sent[0]
     assert "PY-003 — согласование скрытой проверки" in text
     assert "Трактовка" in text
-    assert "Предлагаемое правильное решение" in text
-    buttons = markup["inline_keyboard"][0]
-    actions = {button["text"]: button["callback_data"] for button in buttons}
+    assert "План скрытой проверки" in text
+    assert "Предлагаемое правильное решение" not in text
+    actions = {
+        button["text"]: button["callback_data"]
+        for row in markup["inline_keyboard"]
+        for button in row
+    }
+    assert set(actions) == {
+        "Утвердить",
+        "Изменить",
+        "Варианты",
+        "Решение",
+        "Пауза",
+        "Отменить задачу",
+    }
+
+    assert (
+        bot.handle_update(_callback(98, actions["Варианты"], message_id=message_id))
+        == "showed-options"
+    )
+    assert "Что вернуть для пустого списка?" in telegram.sent[-1][1]
+    assert (
+        bot.handle_update(_callback(99, actions["Решение"], message_id=message_id))
+        == "showed-solution"
+    )
+    assert "def next_id(rows): return 1" in telegram.sent[-1][1]
 
     assert (
         bot.handle_update(_callback(100, actions["Утвердить"], message_id=message_id))
@@ -244,6 +278,141 @@ def test_bot_sends_mentor_proposal_with_versioned_approve_revision_pause_buttons
         bot.handle_update(_callback(101, actions["Утвердить"], message_id=message_id))
         == "expired"
     )
+
+
+def test_cancel_button_terminates_exact_review_and_expires_old_actions(tmp_path) -> None:
+    grader = GraderStore(tmp_path / "grader.db", clock=lambda: 100.0)
+    review = _mentor_review(grader)
+    telegram = FakeTelegram()
+    bot = MentiBot(
+        grader_store=grader,
+        state_store=MentiStateStore(tmp_path / "menti.db"),
+        transport=telegram,
+        allowed_chat_id=42,
+        allowed_user_id=7,
+    )
+    assert bot.sync_pending_mentor_review() == "sent"
+    _, _, message_id, markup = telegram.sent[0]
+    actions = {
+        button["text"]: button["callback_data"]
+        for row in markup["inline_keyboard"]
+        for button in row
+    }
+
+    assert (
+        bot.handle_update(
+            _callback(120, actions["Отменить задачу"], message_id=message_id)
+        )
+        == "cancelled-task"
+    )
+    assert grader.get_authoring(review.task_id).state == "cancelled"
+    assert (
+        bot.handle_update(_callback(121, actions["Утвердить"], message_id=message_id))
+        == "expired"
+    )
+
+
+def test_paused_review_can_be_resumed_by_exact_task_command(tmp_path) -> None:
+    grader = GraderStore(tmp_path / "grader.db", clock=lambda: 100.0)
+    review = _mentor_review(grader)
+    telegram = FakeTelegram()
+    bot = MentiBot(
+        grader_store=grader,
+        state_store=MentiStateStore(tmp_path / "menti.db"),
+        transport=telegram,
+        allowed_chat_id=42,
+        allowed_user_id=7,
+    )
+    assert bot.sync_pending_mentor_review() == "sent"
+    _, _, message_id, markup = telegram.sent[0]
+    actions = {
+        button["text"]: button["callback_data"]
+        for row in markup["inline_keyboard"]
+        for button in row
+    }
+    assert (
+        bot.handle_update(_callback(130, actions["Пауза"], message_id=message_id))
+        == "paused-review"
+    )
+    assert grader.get_authoring(review.task_id).state == "mentor_paused"
+
+    assert bot.handle_update(_message(131, "/resume PY-003")) == "resumed-review"
+    assert grader.get_authoring(review.task_id).state == "awaiting_mentor_approval"
+    assert bot.sync_pending_mentor_review() == "sent"
+    new_markup = telegram.sent[-1][3]
+    new_actions = {
+        button["text"]: button["callback_data"]
+        for row in new_markup["inline_keyboard"]
+        for button in row
+    }
+    assert new_actions["Утвердить"] != actions["Утвердить"]
+    assert (
+        bot.handle_update(_callback(132, actions["Утвердить"], message_id=message_id))
+        == "expired"
+    )
+
+
+def test_crash_after_durable_pause_cannot_reactivate_old_callback(tmp_path) -> None:
+    grader = GraderStore(tmp_path / "grader.db", clock=lambda: 100.0)
+    review = _mentor_review(grader)
+    telegram = FakeTelegram()
+    bot = MentiBot(
+        grader_store=grader,
+        state_store=MentiStateStore(tmp_path / "menti.db"),
+        transport=telegram,
+        allowed_chat_id=42,
+        allowed_user_id=7,
+    )
+    assert bot.sync_pending_mentor_review() == "sent"
+    _, _, message_id, markup = telegram.sent[0]
+    actions = {
+        button["text"]: button["callback_data"]
+        for row in markup["inline_keyboard"]
+        for button in row
+    }
+
+    # Simulate a process crash after the grader DB commits pause but before
+    # MentiStateStore.close_review() can invalidate the Telegram callback token.
+    assert grader.pause_mentor_review(review.task_id, review.version, review.draft_hash)
+    assert grader.resume_mentor_review(review.task_id)
+    resumed = grader.next_pending_mentor_review()
+    assert resumed is not None and resumed.version > review.version
+    assert (
+        bot.handle_update(_callback(140, actions["Утвердить"], message_id=message_id))
+        == "expired"
+    )
+    assert grader.get_authoring(review.task_id).state == "awaiting_mentor_approval"
+
+
+def test_maximum_valid_proposal_messages_stay_within_telegram_limit(tmp_path) -> None:
+    grader = GraderStore(tmp_path / "grader.db", clock=lambda: 100.0)
+    review = _mentor_review(grader)
+    decision = {
+        "question": "q" * 500,
+        "options": ["a" * 700, "b" * 700, "c" * 700, "d" * 700],
+        "recommended_option": 0,
+        "reason": "r" * 700,
+    }
+    proposal = MentorProposal.from_output(
+        __import__("json").dumps(
+            {
+                "schema_version": 1,
+                "interpretation": "i" * 2_000,
+                "criteria": ["c" * 700 for _ in range(20)],
+                "decisions": [decision for _ in range(10)],
+                "test_plan": ["t" * 700 for _ in range(30)],
+                "reference_approach": "a" * 2_000,
+                "reference_solution": "s" * 8_000,
+                "critic_summary": "k" * 1_000,
+            }
+        )
+    )
+
+    assert len(_format_mentor_review(review, proposal)) <= 3_950
+    option_chunks = _telegram_chunks(_format_mentor_options(review.task_id, proposal))
+    solution_chunks = _telegram_chunks(_format_mentor_solution(review.task_id, proposal))
+    assert option_chunks and solution_chunks
+    assert all(0 < len(chunk) <= 3_950 for chunk in (*option_chunks, *solution_chunks))
 
 
 def test_revision_button_requires_reply_to_current_prompt_and_invalidates_old_callback(
@@ -280,3 +449,61 @@ def test_revision_button_requires_reply_to_current_prompt_and_invalidates_old_ca
     assert bot.handle_update(
         _callback(113, actions["Утвердить"], message_id=proposal_message)
     ) == "expired"
+
+
+def test_bot_delivers_durable_code_feedback_after_grade(tmp_path) -> None:
+    grader = GraderStore(tmp_path / "grader.db", clock=lambda: 100.0)
+    attempt = grader.enqueue_grading(
+        task_id="PY-002",
+        project="json",
+        branch_name="task/PY-002-next-id",
+        commit_sha="b" * 40,
+        suite_hash="c" * 64,
+    )
+    claimed = grader.claim_next_grading()
+    assert claimed is not None
+    feedback_input = (
+        '{"assignment":{},"commit_sha":"' + "b" * 40 + '","grade":{},'
+        '"mentor_proposal":null,"schema_version":1,"source_files":['
+        '{"content":"x","path":"main.py"}],"task_id":"PY-002"}'
+    )
+    assert grader.complete_grading(
+        attempt.attempt_id,
+        claimed.lease_token,
+        passed=True,
+        passed_count=1,
+        total_count=1,
+        private_report_json=(
+            '{"failed_rubrics":[],"passed":1,"total":1}'
+        ),
+        feedback_input_json=feedback_input,
+    )
+    job = grader.claim_next_code_feedback()
+    assert job is not None
+    assert grader.complete_code_feedback(
+        job.feedback_id,
+        job.lease_token,
+        (
+            '{"recommendations":["Добавить понятные имена."],'
+            '"schema_version":1,"strengths":["Код короткий."],'
+            '"summary":"Решение работает.",'
+            '"weaknesses":["Мало пояснений."]}'
+        ),
+    )
+    telegram = FakeTelegram()
+    bot = MentiBot(
+        grader_store=grader,
+        state_store=MentiStateStore(tmp_path / "menti.db"),
+        transport=telegram,
+        allowed_chat_id=42,
+        allowed_user_id=7,
+    )
+
+    assert bot.sync_feedback_notification() == "sent"
+    assert bot.sync_feedback_notification() == "idle"
+    text = telegram.sent[0][1]
+    assert "PY-002 — разбор кода" in text
+    assert "Сильные стороны" in text
+    assert "Слабые места" in text
+    assert "Рекомендации" in text
+    assert "bbbbbbbbbbbb" in text

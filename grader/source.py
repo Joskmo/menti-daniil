@@ -72,9 +72,7 @@ class GitSourceLoader:
         with self._cache_lock():
             self._ensure_bare_repository()
             remote_ref = self._fetch_branch(branch_name)
-            fetched_sha = self._git_dir("rev-parse", "--verify", remote_ref).decode().strip()
-            if fetched_sha != starter_sha:
-                raise RuntimeError("task branch moved away from the pinned starter commit")
+            self._require_pinned_starter(remote_ref, starter_sha)
             return self._execution_files(starter_sha, project)
 
     def _validate_request(self, project: str, branch_name: str, commit_sha: str) -> None:
@@ -125,9 +123,7 @@ class GitSourceLoader:
         starter_sha: str,
     ) -> tuple[SourceFile, ...]:
         remote_ref = self._fetch_branch(branch_name)
-        fetched_sha = self._git_dir("rev-parse", "--verify", remote_ref).decode().strip()
-        if fetched_sha != starter_sha:
-            raise RuntimeError("task branch moved away from the pinned starter commit")
+        self._require_pinned_starter(remote_ref, starter_sha)
         prefix = f"projects/{project}/"
         output = self._tree(starter_sha, prefix)
         files: list[SourceFile] = []
@@ -154,6 +150,14 @@ class GitSourceLoader:
         if not files:
             raise RuntimeError("project has no bounded author-visible source files")
         return tuple(files)
+
+    def _require_pinned_starter(self, remote_ref: str, starter_sha: str) -> None:
+        try:
+            self._git_dir("merge-base", "--is-ancestor", starter_sha, remote_ref)
+        except RuntimeError as error:
+            raise RuntimeError(
+                "task branch does not contain the pinned starter commit"
+            ) from error
 
     def _tree(self, commit_sha: str, prefix: str) -> bytes:
         return self._git_dir(
@@ -291,7 +295,7 @@ class GitProjectExporter(GitSourceLoader):
             for source_file in records:
                 output_path = destination / PurePosixPath(source_file.path)
                 output_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-                output_path.write_text(source_file.content, encoding="utf-8")
+                output_path.write_bytes(source_file.content.encode("utf-8"))
                 os.chmod(output_path, 0o600)
             return destination
 

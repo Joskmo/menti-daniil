@@ -10,6 +10,8 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 _REQUEST_ID = re.compile(r"[0-9a-f]{32}")
+_MAX_COMPLETE_OBSERVATION_BYTES = 500_000
+_MAX_OBSERVED_FILE_BYTES = 400_000
 
 
 class GuestSupervisor:
@@ -83,6 +85,9 @@ class GuestSupervisor:
                     "HOME": str(workspace),
                     "LANG": "C.UTF-8",
                     "LC_ALL": "C.UTF-8",
+                    "MENTI_STUDENT_TIMEOUT_SECONDS": str(
+                        min(5.0, max(0.1, self.timeout_seconds - 1.0))
+                    ),
                     "PATH": "/usr/bin:/bin",
                     "PYTHONDONTWRITEBYTECODE": "1",
                     "PYTHONHASHSEED": "0",
@@ -91,13 +96,18 @@ class GuestSupervisor:
                 },
                 preexec_fn=self._sandbox_child,
             )
-            if completed.returncode != 0 or len(completed.stdout.encode("utf-8")) > 1_000_000:
-                raise RuntimeError("student child did not produce a bounded observation")
+            if completed.returncode != 0:
+                raise RuntimeError("trusted student runner exited unsuccessfully")
+            if len(completed.stdout.encode("utf-8")) > 1_000_000:
+                raise RuntimeError("student child produced an oversized observation")
             observation = json.loads(completed.stdout)
             _validate_child_observation(observation)
             observation["files"] = [
                 _observe_file(workspace, path) for path in execution["observe_files"]
             ]
+            if not _valid_complete_observation(observation):
+                observation = _student_process_failure()
+                observation["files"] = []
             return {
                 "version": 1,
                 "request_id": request_id,
@@ -124,12 +134,12 @@ class GuestSupervisor:
         os.setsid()
         os.umask(0o077)
         resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
-        resource.setrlimit(resource.RLIMIT_CPU, (3, 3))
+        resource.setrlimit(resource.RLIMIT_CPU, (5, 5))
         resource.setrlimit(resource.RLIMIT_AS, (256 * 1024 * 1024, 256 * 1024 * 1024))
         resource.setrlimit(resource.RLIMIT_FSIZE, (16 * 1024 * 1024, 16 * 1024 * 1024))
         resource.setrlimit(resource.RLIMIT_NOFILE, (64, 64))
-        resource.setrlimit(resource.RLIMIT_NPROC, (32, 32))
         if os.geteuid() == 0:
+            resource.setrlimit(resource.RLIMIT_NPROC, (32, 32))
             os.setgroups([])
             os.setgid(self.student_gid)
             os.setuid(self.student_uid)
@@ -199,10 +209,10 @@ def _observe_file(workspace: Path, relative: str) -> dict[str, Any]:
     path = workspace / _safe_path(relative)
     if path.is_symlink() or not path.is_file():
         return {"path": relative, "present": False, "content": None, "truncated": False}
-    if path.stat().st_size > 1_000_000:
+    if path.stat().st_size > _MAX_OBSERVED_FILE_BYTES:
         return {"path": relative, "present": True, "content": None, "truncated": True}
     try:
-        content = path.read_text(encoding="utf-8")
+        content = path.read_bytes().decode("utf-8")
     except UnicodeDecodeError:
         return {"path": relative, "present": True, "content": None, "truncated": True}
     return {"path": relative, "present": True, "content": content, "truncated": False}
@@ -228,6 +238,39 @@ def _validate_child_observation(value: Any) -> None:
         raise ValueError("invalid child output")
     if isinstance(value["exit_code"], bool) or not isinstance(value["exit_code"], int):
         raise ValueError("invalid child exit code")
+
+
+def _valid_complete_observation(value: dict[str, Any]) -> bool:
+    files = value.get("files")
+    if not isinstance(files, list):
+        return False
+    for item in files:
+        if not isinstance(item, dict):
+            return False
+        content = item.get("content")
+        if content is not None and (not isinstance(content, str) or "\x00" in content):
+            return False
+    try:
+        encoded = json.dumps(
+            value,
+            ensure_ascii=False,
+            allow_nan=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    except (TypeError, ValueError, UnicodeEncodeError):
+        return False
+    return len(encoded) <= _MAX_COMPLETE_OBSERVATION_BYTES
+
+
+def _student_process_failure() -> dict[str, Any]:
+    return {
+        "return": None,
+        "exception": "menti.StudentProcessFailure",
+        "stdout": "",
+        "stderr": "",
+        "exit_code": 1,
+        "args_after": None,
+    }
 
 
 def _safe_path(value: Any) -> PurePosixPath:

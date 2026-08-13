@@ -14,20 +14,12 @@ _MAX_RESPONSE_BYTES = 2_000_000
 _MAX_SOURCE_BYTES = 2_000_000
 _REQUEST_ID = re.compile(r"[0-9a-f]{32}")
 _TARGET = re.compile(r"[A-Za-z0-9_./:-]{1,200}")
-_ALLOWED_SOURCE_SUFFIXES = {
-    ".py",
-    ".csv",
-    ".json",
-    ".md",
-    ".txt",
-    ".toml",
-    ".yaml",
-    ".yml",
-}
-
-
 class LauncherProtocolError(RuntimeError):
     """A VM launcher request or response violated the bounded protocol."""
+
+
+class _StudentSourceFailure(RuntimeError):
+    pass
 
 
 VmBackend = Callable[[tuple[dict[str, str], ...], dict[str, Any]], dict[str, Any]]
@@ -52,7 +44,7 @@ def validate_launcher_request(value: Any) -> dict[str, Any]:
         if not isinstance(source_file, dict) or set(source_file) != {"path", "content"}:
             raise LauncherProtocolError("invalid source file fields")
         path = _safe_path(source_file["path"], "source")
-        if path in seen or PurePosixPath(path).suffix.lower() not in _ALLOWED_SOURCE_SUFFIXES:
+        if path in seen:
             raise LauncherProtocolError("invalid or duplicate source path")
         content = source_file["content"]
         if not isinstance(content, str) or "\x00" in content:
@@ -76,8 +68,11 @@ class UnixVmLauncherClient:
         self.timeout_seconds = timeout_seconds
 
     def execute(self, source_directory: Path, request: dict[str, Any]) -> dict[str, Any]:
-        source_files = _read_source(source_directory)
         request_id = request.get("request_id") if isinstance(request, dict) else None
+        try:
+            source_files = _read_source(source_directory)
+        except _StudentSourceFailure:
+            return _student_failure_response(request_id)
         value = validate_launcher_request(
             {
                 "version": 1,
@@ -86,6 +81,8 @@ class UnixVmLauncherClient:
                 "execution": request,
             }
         )
+        if len(_encode_frame(value)) > _MAX_REQUEST_BYTES:
+            return _student_failure_response(request_id)
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
             connection.settimeout(self.timeout_seconds)
             try:
@@ -182,13 +179,17 @@ def _read_source(root: Path) -> tuple[dict[str, str], ...]:
         if not candidate.is_file():
             continue
         relative = candidate.relative_to(root).as_posix()
-        if PurePosixPath(relative).suffix.lower() not in _ALLOWED_SOURCE_SUFFIXES:
-            continue
         _safe_path(relative, "source")
         try:
-            content = candidate.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError) as error:
+            raw_content = candidate.read_bytes()
+        except OSError as error:
             raise LauncherProtocolError("source file must be bounded UTF-8 text") from error
+        try:
+            content = raw_content.decode("utf-8")
+        except UnicodeDecodeError as error:
+            raise _StudentSourceFailure("source is not UTF-8") from error
+        if "\x00" in content:
+            raise _StudentSourceFailure("source contains NUL")
         files.append({"path": relative, "content": content})
     return tuple(files)
 
@@ -253,8 +254,15 @@ def _peer_uid(connection: socket.socket) -> int:
 
 
 def _send_frame(connection: socket.socket, value: Any, maximum: int) -> None:
+    payload = _encode_frame(value)
+    if not payload or len(payload) > maximum:
+        raise LauncherProtocolError("launcher frame has invalid size")
+    connection.sendall(struct.pack("!I", len(payload)) + payload)
+
+
+def _encode_frame(value: Any) -> bytes:
     try:
-        payload = json.dumps(
+        return json.dumps(
             value,
             ensure_ascii=False,
             allow_nan=False,
@@ -262,9 +270,25 @@ def _send_frame(connection: socket.socket, value: Any, maximum: int) -> None:
         ).encode("utf-8")
     except (TypeError, ValueError, UnicodeEncodeError) as error:
         raise LauncherProtocolError("launcher frame is not valid JSON") from error
-    if not payload or len(payload) > maximum:
-        raise LauncherProtocolError("launcher frame has invalid size")
-    connection.sendall(struct.pack("!I", len(payload)) + payload)
+
+
+def _student_failure_response(request_id: Any) -> dict[str, Any]:
+    if not _valid_request_id(request_id):
+        raise LauncherProtocolError("invalid launcher request identity")
+    return {
+        "version": 1,
+        "request_id": request_id,
+        "status": "ok",
+        "observation": {
+            "return": None,
+            "exception": "menti.StudentProcessFailure",
+            "stdout": "",
+            "stderr": "",
+            "exit_code": 1,
+            "args_after": None,
+            "files": [],
+        },
+    }
 
 
 def _receive_frame(connection: socket.socket, maximum: int) -> Any:

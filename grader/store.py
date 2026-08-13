@@ -217,6 +217,16 @@ class GraderStore:
                     "ALTER TABLE grading_attempts "
                     "ADD COLUMN next_attempt_at REAL NOT NULL DEFAULT 0"
                 )
+            migration_time = self.clock()
+            connection.execute(
+                """
+                UPDATE grading_attempts
+                SET state = 'queued', attempts = 0, lease_token = NULL,
+                    lease_expires_at = NULL, next_attempt_at = ?, updated_at = ?
+                WHERE state = 'failed'
+                """,
+                (migration_time, migration_time),
+            )
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS check_publications (
@@ -770,11 +780,12 @@ class GraderStore:
                 cursor = connection.execute(
                     """
                     UPDATE grading_attempts
-                    SET state = 'failed', last_error_code = ?, lease_token = NULL,
-                        lease_expires_at = NULL, next_attempt_at = 0, updated_at = ?
+                    SET state = 'queued', attempts = 0, last_error_code = ?,
+                        lease_token = NULL, lease_expires_at = NULL,
+                        next_attempt_at = ?, updated_at = ?
                     WHERE attempt_id = ? AND state = 'grading' AND lease_token = ?
                     """,
-                    (error_code, now, attempt_id, lease_token),
+                    (error_code, now + 3600, now, attempt_id, lease_token),
                 )
                 return cursor.rowcount == 1
             delay = min(

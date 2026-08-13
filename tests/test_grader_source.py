@@ -60,7 +60,7 @@ def test_project_exporter_materializes_exact_reachable_commit_without_checkout(t
     _git("checkout", branch, cwd=work)
     project = work / "projects" / "json"
     (project / "data.json").write_text('[{"id": 1}]\n')
-    (project / "settings.ini").write_text("mode=strict\n")
+    (project / "settings.ini").write_bytes(b"mode=strict\r\nnext=yes\r")
     (project / "test_solution.py").write_text("def test_public(): pass\n")
     _git("add", ".", cwd=work)
     _git("commit", "-m", "student commit", cwd=work)
@@ -86,6 +86,7 @@ def test_project_exporter_materializes_exact_reachable_commit_without_checkout(t
         "test_solution.py",
     ]
     assert not (destination / ".git").exists()
+    assert (destination / "settings.ini").read_bytes() == b"mode=strict\r\nnext=yes\r"
 
 
 def test_project_exporter_rejects_force_pushed_unrelated_history(tmp_path) -> None:
@@ -111,7 +112,7 @@ def test_project_exporter_rejects_force_pushed_unrelated_history(tmp_path) -> No
         )
 
 
-def test_source_loader_fails_closed_when_remote_branch_moved_from_pinned_sha(tmp_path) -> None:
+def test_source_loader_reads_immutable_starter_after_descendant_push(tmp_path) -> None:
     remote, branch, sha = _repository(tmp_path)
     work = tmp_path / "work"
     _git("checkout", branch, cwd=work)
@@ -121,8 +122,31 @@ def test_source_loader_fails_closed_when_remote_branch_moved_from_pinned_sha(tmp
     _git("push", "origin", branch, cwd=work)
     loader = GitSourceLoader(remote, tmp_path / "cache.git")
 
-    with pytest.raises(RuntimeError, match="pinned starter commit"):
-        loader.load("json", branch, sha)
+    author_files = loader.load("json", branch, sha)
+    execution_files = loader.load_execution("json", branch, sha)
+
+    assert dict((item.path, item.content) for item in author_files)["main.py"] == (
+        "def next_id(rows): return len(rows) + 1\n"
+    )
+    assert dict((item.path, item.content) for item in execution_files)["main.py"] == (
+        "def next_id(rows): return len(rows) + 1\n"
+    )
+
+
+def test_source_loader_rejects_branch_that_no_longer_contains_starter(tmp_path) -> None:
+    remote, branch, sha = _repository(tmp_path)
+    work = tmp_path / "work"
+    _git("checkout", "--orphan", "replacement", cwd=work)
+    _git("rm", "-rf", ".", cwd=work)
+    project = work / "projects" / "json"
+    project.mkdir(parents=True)
+    (project / "main.py").write_text("CHANGED = True\n")
+    _git("add", ".", cwd=work)
+    _git("commit", "-m", "replace history", cwd=work)
+    _git("push", "--force", "origin", f"HEAD:{branch}", cwd=work)
+
+    with pytest.raises(RuntimeError, match="pinned starter"):
+        GitSourceLoader(remote, tmp_path / "cache.git").load("json", branch, sha)
 
 
 def test_source_loader_keeps_exact_execution_tree_separate_from_llm_snapshot(tmp_path) -> None:

@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "status": "clarification_required",
+  "summary": "Не определена политика выбора следующего ID.",
+  "clarification": "Как выбирать следующий ID при пропусках и что вернуть для пустого списка?",
+  "rubric": [],
+  "cases": []
+}

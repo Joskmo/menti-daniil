@@ -52,6 +52,14 @@ class GitBranchClient:
         branch: str,
         project_directory: str,
     ) -> str:
+        starter_sha = self.prepare_branch(branch, project_directory)
+        return self.ensure_prepared_branch(branch, starter_sha)
+
+    def prepare_branch(
+        self,
+        branch: str,
+        project_directory: str,
+    ) -> str:
         if not _BRANCH_PATTERN.fullmatch(branch):
             raise ValueError(f"Unsafe branch name: {branch!r}")
         if (
@@ -61,9 +69,6 @@ class GitBranchClient:
             raise ValueError(f"Unsafe project directory: {project_directory!r}")
 
         with self._lock:
-            if self._branch_exists(branch):
-                return self._branch_url(branch)
-
             self.git_dir.parent.mkdir(parents=True, exist_ok=True)
             if not self.git_dir.exists():
                 self._run(["git", "init", "--bare", str(self.git_dir)])
@@ -79,7 +84,19 @@ class GitBranchClient:
                     f"refs/heads/{self.base_branch}:refs/remotes/origin/{self.base_branch}",
                 ]
             )
-            commit = self._project_commit(branch, project_directory)
+            return self._project_commit(branch, project_directory)
+
+    def ensure_prepared_branch(self, branch: str, starter_sha: str) -> str:
+        if not _BRANCH_PATTERN.fullmatch(branch):
+            raise ValueError(f"Unsafe branch name: {branch!r}")
+        if re.fullmatch(r"[0-9a-f]{40}", starter_sha) is None:
+            raise ValueError("Unsafe starter SHA")
+        with self._lock:
+            existing = self._remote_branch_sha(branch)
+            if existing is not None:
+                if existing != starter_sha:
+                    raise RuntimeError("Existing task branch does not match reserved starter")
+                return self._branch_url(branch)
             self._run(
                 [
                     "git",
@@ -87,10 +104,60 @@ class GitBranchClient:
                     str(self.git_dir),
                     "push",
                     self.repository_ssh,
-                    f"{commit}:refs/heads/{branch}",
+                    f"{starter_sha}:refs/heads/{branch}",
                 ]
             )
             return self._branch_url(branch)
+
+    def _remote_branch_sha(self, branch: str) -> str | None:
+        output = self._run(
+            [
+                "git",
+                "ls-remote",
+                "--heads",
+                self.repository_ssh,
+                f"refs/heads/{branch}",
+            ]
+        )
+        lines = [line for line in output.splitlines() if line]
+        if not lines:
+            return None
+        if len(lines) != 1:
+            raise RuntimeError("Remote branch does not resolve to exactly one commit")
+        parts = lines[0].split()
+        expected_ref = f"refs/heads/{branch}"
+        if (
+            len(parts) != 2
+            or parts[1] != expected_ref
+            or re.fullmatch(r"[0-9a-f]{40}", parts[0]) is None
+        ):
+            raise RuntimeError("Remote branch returned an invalid commit identity")
+        return parts[0]
+
+    def branch_sha(self, branch: str) -> str:
+        if not _BRANCH_PATTERN.fullmatch(branch):
+            raise ValueError(f"Unsafe branch name: {branch!r}")
+        output = self._run(
+            [
+                "git",
+                "ls-remote",
+                "--heads",
+                self.repository_ssh,
+                f"refs/heads/{branch}",
+            ]
+        )
+        lines = [line for line in output.splitlines() if line]
+        if len(lines) != 1:
+            raise RuntimeError("Remote branch does not resolve to exactly one commit")
+        parts = lines[0].split()
+        expected_ref = f"refs/heads/{branch}"
+        if (
+            len(parts) != 2
+            or parts[1] != expected_ref
+            or re.fullmatch(r"[0-9a-f]{40}(?:[0-9a-f]{24})?", parts[0]) is None
+        ):
+            raise RuntimeError("Remote branch returned an invalid commit identity")
+        return parts[0]
 
     def _project_commit(
         self,

@@ -31,6 +31,7 @@ def test_list_tasks_maps_yonote_row_values() -> None:
                     {
                         "id": "row-1",
                         "title": "Пустой JSON",
+                        "text": "Программа должна корректно обрабатывать пустой JSON.",
                         "createdAt": "2026-08-09T12:00:00Z",
                         "values": {
                             "status-prop": ["planned"],
@@ -56,6 +57,7 @@ def test_list_tasks_maps_yonote_row_values() -> None:
 
     assert len(tasks) == 1
     assert tasks[0].row_id == "row-1"
+    assert tasks[0].description == "Программа должна корректно обрабатывать пустой JSON."
     assert tasks[0].status_id == "planned"
     assert tasks[0].assignee_ids == ("daniil",)
     assert tasks[0].project == "json"

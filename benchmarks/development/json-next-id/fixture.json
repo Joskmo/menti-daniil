@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "id": "json-next-id",
+  "tier": "development",
+  "task_id": "BENCH-001",
+  "project": "json-next-id",
+  "title": "Следующий ID",
+  "description": "Реализуйте функцию next_id(rows). Она принимает список словарей с целочисленным полем id и возвращает максимальный id плюс один. Порядок элементов не имеет значения. Для пустого списка функция возвращает 1. Входной список изменять нельзя.",
+  "expected_status": "ready",
+  "minimum_mutation_score": 1.0
+}

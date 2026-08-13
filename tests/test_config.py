@@ -21,6 +21,13 @@ def test_settings_require_nonempty_secrets() -> None:
         Settings.from_mapping(values)
 
 
+def test_settings_reject_blank_mentor_assignee_id() -> None:
+    values = {**VALID_SETTINGS, "YONOTE_MENTOR_ASSIGNEE_ID": "   "}
+
+    with pytest.raises(ValueError, match="YONOTE_MENTOR_ASSIGNEE_ID"):
+        Settings.from_mapping(values)
+
+
 def test_settings_have_safe_deployment_defaults() -> None:
     settings = Settings.from_mapping(VALID_SETTINGS)
 
@@ -30,6 +37,15 @@ def test_settings_have_safe_deployment_defaults() -> None:
     assert settings.base_branch == "main"
     assert settings.poll_interval == 15
     assert settings.port == 8080
+    assert settings.grader_database_path is None
+
+
+def test_settings_enable_grader_only_with_explicit_database_path() -> None:
+    settings = Settings.from_mapping(
+        {**VALID_SETTINGS, "GRADER_DATABASE_PATH": "/grader-data/grader.db"}
+    )
+
+    assert settings.grader_database_path.as_posix() == "/grader-data/grader.db"
 
 
 @pytest.mark.parametrize(

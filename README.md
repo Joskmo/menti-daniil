@@ -44,3 +44,42 @@ projects/
 Поле `Проект` — стабильный технический ключ: только латинские строчные буквы,
 цифры и одиночные дефисы, не более 64 символов (например, `json` или
 `currency-converter`). Разные проекты должны иметь разные ключи.
+
+## Автоматическая скрытая проверка
+
+Для карточек Даниила bridge фиксирует точный стартовый commit и передаёт задачу
+закрытому grader. TestAuthor составляет декларативный набор проверок, независимый
+TestCritic проверяет его качество, после чего starter дважды исполняется в
+одноразовой QEMU/KVM VM. Набор замораживается только если он детерминированно
+находит дефект в starter.
+
+Каждый следующий push в task-ветку попадает в durable очередь и проверяется в
+новой VM без сети. В GitHub публикуется обязательный check `hidden-grade` только
+с итогом pass/fail; подробный отчёт остаётся в приватном Telegram-боте ментора.
+Hidden suite и ожидаемые значения не записываются в GitHub.
+
+### Запуск grader profile
+
+1. Скопировать grader-переменные из `.env.example` в локальный `.env`.
+2. Создать каталоги state, vault, Git cache, launcher socket, broker socket и bot
+   data; владельцем должен быть UID `1000`, mode — `0700`.
+3. Положить GitHub App private key в `.secrets/github_app_private_key` с mode
+   `0600`. В App нужны `Contents: read`, `Pull requests: read`, `Checks: write`.
+4. Запустить credential broker через Hermes Python вне Compose, направив socket в
+   `GRADER_BROKER_RUN_DIR`.
+5. Запустить сервисы:
+
+```bash
+docker compose --profile grader up -d --build
+```
+
+Проверка состояния:
+
+```bash
+docker compose --profile grader ps
+docker compose --profile grader logs --tail=100 \
+  menti-authoring-worker menti-grading-worker menti-check-publisher menti-grader-bot
+```
+
+`hidden-grade` следует добавлять в branch protection только после успешного
+первого live Check Run, чтобы не заблокировать PR до установки GitHub App.

@@ -33,6 +33,7 @@ class Settings:
     git_dir: Path
     ssh_key: Path
     known_hosts: Path
+    grader_database_path: Path | None
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -97,6 +98,16 @@ class Settings:
         yonote_api_key = credential("YONOTE_API_KEY")
         github_webhook_secret = generated_secret("GITHUB_WEBHOOK_SECRET")
         yonote_webhook_path_secret = generated_secret("YONOTE_WEBHOOK_PATH_SECRET")
+        grader_path_value = values.get("GRADER_DATABASE_PATH", "").strip()
+        grader_database_path = Path(grader_path_value) if grader_path_value else None
+        mentor_assignee_id = values.get(
+            "YONOTE_MENTOR_ASSIGNEE_ID",
+            "b5b7f053-07c2-4008-8b1b-72eeab60724a",
+        ).strip()
+        if not mentor_assignee_id:
+            raise ValueError("YONOTE_MENTOR_ASSIGNEE_ID must be set and non-empty")
+        if grader_database_path is not None and not grader_database_path.is_absolute():
+            raise ValueError("GRADER_DATABASE_PATH must be absolute when set")
         if len({yonote_api_key, github_webhook_secret, yonote_webhook_path_secret}) != 3:
             raise ValueError("Secrets must be distinct")
 
@@ -138,10 +149,7 @@ class Settings:
             assignee_id=values.get(
                 "YONOTE_ASSIGNEE_ID", "632a8b92-3611-477b-b6d6-b5a0df87e57e"
             ),
-            mentor_assignee_id=values.get(
-                "YONOTE_MENTOR_ASSIGNEE_ID",
-                "b5b7f053-07c2-4008-8b1b-72eeab60724a",
-            ),
+            mentor_assignee_id=mentor_assignee_id,
             repository=values.get("GITHUB_REPOSITORY", "Joskmo/menti-daniil"),
             base_branch=values.get("GITHUB_BASE_BRANCH", "main"),
             poll_interval=positive_int("POLL_INTERVAL_SECONDS", "15"),
@@ -151,6 +159,7 @@ class Settings:
             git_dir=Path(values.get("GIT_DIR", "/data/repository.git")),
             ssh_key=Path(values.get("GITHUB_SSH_KEY", "/run/secrets/github_deploy_key")),
             known_hosts=Path(values.get("GITHUB_KNOWN_HOSTS", "/run/secrets/known_hosts")),
+            grader_database_path=grader_database_path,
         )
 
     @property

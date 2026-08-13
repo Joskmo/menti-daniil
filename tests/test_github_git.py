@@ -16,8 +16,9 @@ class FakeRunner:
         return self.outputs.pop(0)
 
 
-def test_existing_branch_is_returned_without_push(tmp_path: Path) -> None:
-    runner = FakeRunner(["abc123\trefs/heads/task/PY-001-pustoy-json\n"])
+def test_existing_branch_must_match_reserved_starter_sha(tmp_path: Path) -> None:
+    branch = "task/PY-001-pustoy-json"
+    runner = FakeRunner([f"{'a' * 40}\trefs/heads/{branch}\n"])
     client = GitBranchClient(
         repository_ssh="git@github.com:Joskmo/menti-daniil.git",
         repository_web="https://github.com/Joskmo/menti-daniil",
@@ -28,14 +29,37 @@ def test_existing_branch_is_returned_without_push(tmp_path: Path) -> None:
         runner=runner,
     )
 
-    url = client.ensure_branch(
-        "task/PY-001-pustoy-json",
-        "json",
+    assert client.ensure_prepared_branch(branch, "a" * 40) == (
+        f"https://github.com/Joskmo/menti-daniil/tree/{branch}"
+    )
+    assert runner.calls == [
+        [
+            "git",
+            "ls-remote",
+            "--heads",
+            "git@github.com:Joskmo/menti-daniil.git",
+            f"refs/heads/{branch}",
+        ]
+    ]
+
+
+def test_existing_mismatched_branch_is_rejected_without_push(tmp_path: Path) -> None:
+    runner = FakeRunner(
+        [f"{'b' * 40}\trefs/heads/task/PY-001-pustoy-json\n"]
+    )
+    client = GitBranchClient(
+        repository_ssh="git@github.com:Joskmo/menti-daniil.git",
+        repository_web="https://github.com/Joskmo/menti-daniil",
+        base_branch="main",
+        git_dir=tmp_path / "repo.git",
+        ssh_key=tmp_path / "key",
+        known_hosts=tmp_path / "known_hosts",
+        runner=runner,
     )
 
-    assert url == (
-        "https://github.com/Joskmo/menti-daniil/tree/task/PY-001-pustoy-json"
-    )
+    with pytest.raises(RuntimeError, match="reserved starter"):
+        client.ensure_prepared_branch("task/PY-001-pustoy-json", "a" * 40)
+
     assert len(runner.calls) == 1
     assert runner.calls[0][-1] == "refs/heads/task/PY-001-pustoy-json"
 

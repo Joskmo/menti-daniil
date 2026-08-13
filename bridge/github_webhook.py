@@ -17,6 +17,16 @@ class YonoteUpdater(Protocol):
     def update_fields(self, row_id: str, fields: dict[str, str]) -> None: ...
 
 
+class CommitGrader(Protocol):
+    def enqueue_commit(
+        self,
+        task_id: str,
+        project: str,
+        branch_name: str,
+        commit_sha: str,
+    ) -> object | None: ...
+
+
 class PullRequestLookup(Protocol):
     def resolve(
         self, repository: str, number: int, branch: str, base_branch: str
@@ -67,6 +77,7 @@ class GitHubWebhookHandler:
         store: SQLiteStore,
         yonote: YonoteUpdater,
         pull_request_lookup: PullRequestLookup | None = None,
+        grader: CommitGrader | None = None,
     ) -> None:
         self.secret = secret
         self.repository = repository
@@ -77,6 +88,7 @@ class GitHubWebhookHandler:
         self.store = store
         self.yonote = yonote
         self.pull_request_lookup = pull_request_lookup
+        self.grader = grader
         self._lifecycle_lock = threading.Lock()
 
     def handle(
@@ -100,12 +112,16 @@ class GitHubWebhookHandler:
         delivery = self.store.claim_next_delivery()
         if delivery is None:
             return False
-        self._process_delivery(
-            delivery.delivery_id,
-            delivery.event,
-            delivery.payload,
-            delivery.token,
-        )
+        try:
+            self._handle_claimed(delivery.event, delivery.payload)
+        except Exception:
+            self.store.release_delivery(
+                delivery.delivery_id,
+                delivery.token,
+                delay_seconds=30,
+            )
+            raise
+        self.store.complete_delivery(delivery.delivery_id, delivery.token)
         return True
 
     def _process_delivery(
@@ -124,6 +140,8 @@ class GitHubWebhookHandler:
         return accepted
 
     def _handle_claimed(self, event: str, payload: bytes) -> bool:
+        if event == "push":
+            return self._handle_push(json.loads(payload))
         if event != "pull_request":
             return True
         body = json.loads(payload)
@@ -215,6 +233,43 @@ class GitHubWebhookHandler:
                 pr_state,
                 updated_at,
             )
+        return True
+
+    def _handle_push(self, body: object) -> bool:
+        if not isinstance(body, dict):
+            return False
+        repository = body.get("repository")
+        if (
+            not isinstance(repository, dict)
+            or repository.get("full_name") != self.repository
+        ):
+            return False
+        if body.get("deleted") is True:
+            return True
+        reference = body.get("ref")
+        commit_sha = body.get("after")
+        if not isinstance(reference, str) or not reference.startswith("refs/heads/"):
+            return False
+        branch = reference.removeprefix("refs/heads/")
+        if (
+            not isinstance(commit_sha, str)
+            or len(commit_sha) != 40
+            or any(character not in "0123456789abcdef" for character in commit_sha)
+        ):
+            return False
+        mapping = self.store.find_by_branch(branch)
+        if mapping is None or self.grader is None:
+            return True
+        if mapping.project_name is None or mapping.starter_sha is None:
+            raise RuntimeError("task mapping identity is not ready for grading")
+        if body.get("created") is True and commit_sha == mapping.starter_sha:
+            return True
+        self.grader.enqueue_commit(
+            mapping.task_id,
+            mapping.project_name,
+            branch,
+            commit_sha,
+        )
         return True
 
     @staticmethod

@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Protocol
 
 from bridge.domain import project_directory_name, task_branch_name
@@ -13,11 +13,17 @@ class YonoteGateway(Protocol):
 
 
 class GitHubGateway(Protocol):
-    def ensure_branch(
+    def prepare_branch(
         self,
         branch: str,
         project_directory: str,
     ) -> str: ...
+
+    def ensure_prepared_branch(self, branch: str, starter_sha: str) -> str: ...
+
+
+class GraderGateway(Protocol):
+    def ensure_suite(self, task: Task, branch_name: str, starter_sha: str) -> str: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,11 +46,13 @@ class BridgeService:
         yonote: YonoteGateway,
         github: GitHubGateway,
         store: SQLiteStore,
+        grader: GraderGateway | None = None,
     ) -> None:
         self.settings = settings
         self.yonote = yonote
         self.github = github
         self.store = store
+        self.grader = grader
 
     def backfill_task_ids(self) -> None:
         tasks = sorted(self.yonote.list_tasks(), key=lambda task: task.created_at)
@@ -63,9 +71,38 @@ class BridgeService:
                 continue
             if not self.settings.accepts_assignee(task.assignee_ids):
                 continue
-            if task.branch_url:
-                continue
             mapping = self.store.find_by_row(task.row_id)
+            if task.branch_url:
+                if mapping is None or mapping.branch_name is None:
+                    continue
+                if mapping.project_name is None:
+                    if not task.project:
+                        continue
+                    try:
+                        project_directory = project_directory_name(task.project)
+                    except ValueError:
+                        continue
+                    mapping = self.store.reserve_branch(
+                        task.row_id,
+                        mapping.branch_name,
+                        project_directory,
+                    )
+                if mapping.starter_sha is None:
+                    continue
+                assert mapping.branch_name is not None
+                if self.grader is not None and self.settings.assignee_id in task.assignee_ids:
+                    assert mapping.project_name is not None
+                    grader_task = replace(
+                        task,
+                        task_id=mapping.task_id,
+                        project=mapping.project_name,
+                    )
+                    self.grader.ensure_suite(
+                        grader_task,
+                        mapping.branch_name,
+                        mapping.starter_sha,
+                    )
+                continue
             has_reserved_intent = bool(
                 mapping and mapping.branch_name and mapping.project_name
             )
@@ -90,12 +127,37 @@ class BridgeService:
             assert mapping.branch_name is not None
             assert mapping.project_name is not None
             branch_name = mapping.branch_name
-            branch_url = mapping.branch_url or self.github.ensure_branch(
+            if mapping.starter_sha is None:
+                starter_sha = self.github.prepare_branch(
+                    branch_name,
+                    mapping.project_name,
+                )
+                mapping = self.store.record_starter_sha(task.row_id, starter_sha)
+            assert mapping.starter_sha is not None
+            branch_url = mapping.branch_url or self.github.ensure_prepared_branch(
                 branch_name,
-                mapping.project_name,
+                mapping.starter_sha,
             )
             if not mapping.branch_url:
-                self.store.record_branch(task.row_id, branch_name, branch_url)
+                mapping = self.store.record_branch(
+                    task.row_id,
+                    branch_name,
+                    branch_url,
+                )
+            if self.grader is not None and self.settings.assignee_id in task.assignee_ids:
+                assert mapping.starter_sha is not None
+                grader_task = replace(
+                    task,
+                    task_id=mapping.task_id,
+                    project=mapping.project_name,
+                )
+                suite_state = self.grader.ensure_suite(
+                    grader_task,
+                    branch_name,
+                    mapping.starter_sha,
+                )
+                if suite_state != "ready":
+                    continue
             self.yonote.update_fields(
                 task.row_id,
                 {"task_id": mapping.task_id, "branch_url": branch_url},

@@ -10,6 +10,7 @@ services:
       - .env
     volumes:
       - ${BRIDGE_DATA_DIR:-menti-github-bridge-data}:/data
+      - ${GRADER_DATABASE_DIR:-./runtime-data/grader-state}:/grader-state
       - ./.secrets/github_deploy_key:/run/secrets/github_deploy_key:ro
       - ./.secrets/known_hosts:/run/secrets/known_hosts:ro
     read_only: true
@@ -28,6 +29,181 @@ services:
       - "traefik.http.services.menti-github-bridge.loadbalancer.server.port=8080"
     networks:
       - web
+
+  menti-grader-vm-launcher:
+    profiles:
+      - grader
+    build:
+      context: .
+      dockerfile: grader-launcher.Dockerfile
+    container_name: menti-grader-vm-launcher
+    restart: unless-stopped
+    command:
+      - --socket
+      - /run/menti-launcher/launcher.sock
+      - --assets
+      - /opt/menti-vm
+      - --allow-uid
+      - "1000"
+    network_mode: none
+    devices:
+      - /dev/kvm:/dev/kvm
+    group_add:
+      - "${KVM_GID:-993}"
+    volumes:
+      - ${GRADER_LAUNCHER_RUN_DIR:-./runtime-data/launcher}:/run/menti-launcher
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=0700,uid=1000,gid=1000
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    pids_limit: 128
+    mem_limit: 512m
+    cpus: 1.5
+    healthcheck:
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
+      test:
+        - CMD
+        - python
+        - -c
+        - "import socket; s=socket.socket(socket.AF_UNIX); s.connect('/run/menti-launcher/launcher.sock'); s.close()"
+
+  menti-authoring-worker:
+    profiles:
+      - grader
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: menti-authoring-worker
+    restart: unless-stopped
+    command:
+      - python
+      - -m
+      - grader.authoring_worker_cli
+    healthcheck:
+      disable: true
+    env_file:
+      - .env
+    depends_on:
+      menti-grader-vm-launcher:
+        condition: service_healthy
+    volumes:
+      - ${GRADER_DATABASE_DIR:-./runtime-data/grader-state}:/grader-state
+      - ${GRADER_SUITE_VAULT_DIR:-./runtime-data/suite-vault}:/suite-vault
+      - ${GRADER_GIT_CACHE_DIR:-./runtime-data/git-cache}:/git-cache
+      - ${GRADER_LAUNCHER_RUN_DIR:-./runtime-data/launcher}:/run/menti-launcher
+      - ${GRADER_BROKER_RUN_DIR:-./runtime-data/broker}:/run/menti-broker:ro
+    read_only: true
+    tmpfs:
+      - /tmp:size=32m,mode=0700,uid=1000,gid=1000
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    pids_limit: 128
+    mem_limit: 256m
+    cpus: 1.0
+
+  menti-grading-worker:
+    profiles:
+      - grader
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: menti-grading-worker
+    restart: unless-stopped
+    command:
+      - python
+      - -m
+      - grader.grading_worker_cli
+    healthcheck:
+      disable: true
+    env_file:
+      - .env
+    depends_on:
+      menti-grader-vm-launcher:
+        condition: service_healthy
+    volumes:
+      - ${GRADER_DATABASE_DIR:-./runtime-data/grader-state}:/grader-state
+      - ${GRADER_SUITE_VAULT_DIR:-./runtime-data/suite-vault}:/suite-vault:ro
+      - ${GRADER_GIT_CACHE_DIR:-./runtime-data/git-cache}:/git-cache
+      - ${GRADER_LAUNCHER_RUN_DIR:-./runtime-data/launcher}:/run/menti-launcher
+
+    read_only: true
+    tmpfs:
+      - /tmp:size=32m,mode=0700,uid=1000,gid=1000
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    pids_limit: 128
+    mem_limit: 256m
+    cpus: 1.0
+
+  menti-check-publisher:
+    profiles:
+      - grader
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: menti-check-publisher
+    restart: unless-stopped
+    command:
+      - python
+      - -m
+      - grader.check_publisher_worker_cli
+    healthcheck:
+      disable: true
+    env_file:
+      - .env
+    volumes:
+      - ${GRADER_DATABASE_DIR:-./runtime-data/grader-state}:/grader-state
+      - ./.secrets/github_app_private_key:/run/secrets/github_app_private_key:ro
+    read_only: true
+    tmpfs:
+      - /tmp:size=8m,mode=0700,uid=1000,gid=1000
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    pids_limit: 32
+    mem_limit: 96m
+    cpus: 0.25
+
+  menti-grader-bot:
+    profiles:
+      - grader
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: menti-grader-bot
+    restart: unless-stopped
+    command:
+      - python
+      - -m
+      - grader.telegram_bot_cli
+    healthcheck:
+      disable: true
+    env_file:
+      - .env
+    volumes:
+      - ${GRADER_DATABASE_DIR:-./runtime-data/grader-state}:/grader-state
+      - ${MENTI_BOT_DATA_DIR:-./runtime-data/menti-bot}:/menti-data
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=0700,uid=1000,gid=1000
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    pids_limit: 64
+    mem_limit: 128m
+    cpus: 0.5
 
 networks:
   web:
